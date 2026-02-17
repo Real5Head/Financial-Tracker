@@ -1,0 +1,1 @@
+# Ignore Database Secrets db_config.json finance_data.json # Ignore PyInstaller build files build/ dist/ *.spec __pycache__/ *.pyc
