@@ -36,14 +36,14 @@ class FinancialTrackerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # Setup Main Window First (So errors show up correctly)
         self.title("Personal Financial Tracker")
         self.geometry("1280x850")
         self.minsize(1000, 700)
         self.configure(fg_color=COLOR_BG)
 
-        # 1. Setup Database Connection
-        self.db_url = self.get_db_url()
-        self.init_db()
+        # 1. Setup Database Connection (Safe Loop)
+        self.initialize_db_connection()
 
         # 2. Load Data from Cloud
         self.data = self.load_data()
@@ -80,51 +80,69 @@ class FinancialTrackerApp(ctk.CTk):
         self.show_frame("dashboard")
 
     # --- DATABASE LOGIC ---
-    def get_db_url(self):
-        """Loads DB URL from config or prompts user if missing."""
+    def initialize_db_connection(self):
+        """Safely connects to the DB. Loops if it fails so the app doesn't crash."""
         config_file = "db_config.json"
-        if os.path.exists(config_file):
-            with open(config_file, "r") as f:
-                return json.load(f).get("db_url")
         
-        # Prompt user if not found
-        dialog = ctk.CTkInputDialog(text="Enter your Neon PostgreSQL Connection String:\n(e.g., postgresql://user:pass@ep-...neon.tech/neondb)", title="Database Setup")
-        url = dialog.get_input()
-        if url:
-            with open(config_file, "w") as f:
-                json.dump({"db_url": url}, f)
-            return url
-        else:
-            messagebox.showerror("Error", "Database URL is required to run the app.")
-            sys.exit()
+        while True:
+            db_url = ""
+            
+            # Check for saved URL
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, "r") as f:
+                        db_url = json.load(f).get("db_url", "").strip()
+                except: pass
+            
+            # If no URL is saved, prompt the user
+            if not db_url:
+                dialog = ctk.CTkInputDialog(
+                    text="Enter Neon PostgreSQL Connection String:\n(Make sure there are no blank spaces)", 
+                    title="Database Setup"
+                )
+                db_url = dialog.get_input()
+                
+                # If user clicks cancel or closes prompt, exit app
+                if not db_url:
+                    sys.exit()
+                    
+                # Clean up the string (removes accidental spaces)
+                db_url = db_url.strip()
+                
+                # Neon requires SSL. Force add it if missing.
+                if "sslmode=require" not in db_url:
+                    if "?" in db_url:
+                        db_url += "&sslmode=require"
+                    else:
+                        db_url += "?sslmode=require"
+                        
+                # Save the new URL
+                with open(config_file, "w") as f:
+                    json.dump({"db_url": db_url}, f)
+            
+            # Test the connection
+            try:
+                self.db_url = db_url
+                with psycopg2.connect(self.db_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("CREATE TABLE IF NOT EXISTS settings (key VARCHAR(50) PRIMARY KEY, value FLOAT)")
+                        cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
+                        cur.execute("INSERT INTO settings (key, value) VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING")
+                    conn.commit()
+                # If we get here, connection is successful! Break the loop.
+                break 
+                
+            except Exception as e:
+                # Connection failed! Wipe the bad config and show error.
+                if os.path.exists(config_file):
+                    os.remove(config_file)
+                messagebox.showerror(
+                    "Connection Error", 
+                    f"Could not connect to the database. The database might be waking up, or the link is invalid.\n\nError details:\n{e}\n\nPlease try again."
+                )
 
     def get_db_connection(self):
         return psycopg2.connect(self.db_url)
-
-    def init_db(self):
-        """Creates tables if they don't exist."""
-        try:
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS settings (
-                            key VARCHAR(50) PRIMARY KEY,
-                            value FLOAT
-                        )
-                    """)
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS transactions (
-                            id VARCHAR(255) PRIMARY KEY,
-                            t_date VARCHAR(50),
-                            t_type VARCHAR(50),
-                            payload JSONB
-                        )
-                    """)
-                    cur.execute("INSERT INTO settings (key, value) VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING")
-                conn.commit()
-        except Exception as e:
-            messagebox.showerror("Database Connection Error", f"Could not connect to Neon Database:\n{e}")
-            sys.exit()
 
     def load_data(self):
         """Fetches all data from Neon DB."""
@@ -146,7 +164,7 @@ class FinancialTrackerApp(ctk.CTk):
 
     def add_transaction_to_db(self, t):
         """Inserts a single transaction into Neon DB."""
-        self.data["transactions"].append(t) # Update local memory
+        self.data["transactions"].append(t) 
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
