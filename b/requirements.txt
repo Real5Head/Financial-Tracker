@@ -1,0 +1,4 @@
+customtkinter
+packaging
+pyinstaller
+psycopg2-binary
