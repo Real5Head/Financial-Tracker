@@ -31,7 +31,7 @@ COLOR_HOVER = "#333333"
 COLOR_SUCCESS = "#2ecc71"    
 COLOR_DANGER = "#e74c3c"     
 COLOR_WARNING = "#f39c12"    
-COLOR_SAVINGS = "#9b59b6"    # Purple for Savings
+COLOR_SAVINGS = "#9b59b6"    
 COLOR_TEXT_MAIN = "#FFFFFF"
 COLOR_TEXT_SUB = "#A0A0A0"
 
@@ -229,7 +229,6 @@ class FinancialTrackerApp(ctk.CTk):
         for btn_name, btn in self.nav_buttons.items():
             btn.configure(fg_color=COLOR_HOVER if btn_name == name else "transparent", text_color="white" if btn_name == name else COLOR_TEXT_SUB)
         
-        # If returning to dashboard, reset to current month
         if name == "dashboard":
             self.current_date = datetime.now()
             self.selected_month = self.current_date.month
@@ -291,7 +290,10 @@ class FinancialTrackerApp(ctk.CTk):
         # Monthly Stats
         earn_txt = f"+ ${stats['month_earned_usd']:,.2f}" if stats['month_earned_dzd'] == 0 else f"+ ${stats['month_earned_usd']:,.2f}  |  + {stats['month_earned_dzd']:,.0f} DZD"
         self.lbl_month_earned.configure(text=earn_txt)
+        
         self.lbl_month_spent_usd.configure(text=f"${stats['month_spent_usd']:,.2f}")
+        self.lbl_month_spent_usd_sub.configure(text=f"≈ {stats['month_spent_usd'] * disp_rate:,.0f} DZD")
+        
         self.lbl_month_spent_dzd.configure(text=f"{stats['month_spent_dzd']:,.2f} DZD")
         
         # Net Worth
@@ -307,6 +309,7 @@ class FinancialTrackerApp(ctk.CTk):
         # Savings Tab Balances
         if "savings" in self.frames:
             self.lbl_vault_usd.configure(text=f"${stats['usd_locked']:,.2f}")
+            self.lbl_vault_usd_sub.configure(text=f"≈ {stats['usd_locked'] * disp_rate:,.0f} DZD")
             self.lbl_vault_dzd.configure(text=f"{stats['dzd_locked']:,.2f} DZD")
 
         self.update_income_list()
@@ -351,12 +354,20 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(c1, text="INCOME THIS MONTH", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_month_earned = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SUCCESS); self.lbl_month_earned.pack(padx=20, pady=(0, 20), anchor="w")
         
+        # Modified Expenses card to fit DZD underneath USD
         c2 = ctk.CTkFrame(row1, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0))
         ctk.CTkLabel(c2, text="EXPENSES THIS MONTH", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         c2i = ctk.CTkFrame(c2, fg_color="transparent"); c2i.pack(padx=20, pady=(0, 20), anchor="w")
-        self.lbl_month_spent_usd = ctk.CTkLabel(c2i, text="$0.00", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_usd.pack(side="left")
-        ctk.CTkLabel(c2i, text="  |  ", font=("Roboto", 20), text_color=COLOR_TEXT_SUB).pack(side="left")
-        self.lbl_month_spent_dzd = ctk.CTkLabel(c2i, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_dzd.pack(side="left")
+        
+        g1 = ctk.CTkFrame(c2i, fg_color="transparent"); g1.pack(side="left")
+        self.lbl_month_spent_usd = ctk.CTkLabel(g1, text="$0.00", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_usd.pack(anchor="w")
+        self.lbl_month_spent_usd_sub = ctk.CTkLabel(g1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_month_spent_usd_sub.pack(anchor="w")
+        
+        ctk.CTkLabel(c2i, text="  |  ", font=("Roboto", 20), text_color=COLOR_TEXT_SUB).pack(side="left", padx=15)
+        
+        g2 = ctk.CTkFrame(c2i, fg_color="transparent"); g2.pack(side="left")
+        self.lbl_month_spent_dzd = ctk.CTkLabel(g2, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_dzd.pack(anchor="w")
+        ctk.CTkLabel(g2, text=" ", font=("Roboto", 12), text_color="transparent").pack(anchor="w") # Spacer to keep things aligned
 
         row2 = ctk.CTkFrame(frame, fg_color="transparent"); row2.grid(row=2, column=0, sticky="ew", pady=(0, 25)); row2.grid_columnconfigure((0, 1, 2), weight=1, uniform="g2")
         c3 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20); c3.grid(row=0, column=0, sticky="ew", padx=(0, 10))
@@ -496,11 +507,13 @@ class FinancialTrackerApp(ctk.CTk):
 
         c1 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c1.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 20))
         ctk.CTkLabel(c1, text="USD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_vault_usd = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_usd.pack(padx=20, pady=(0, 20), anchor="w")
+        self.lbl_vault_usd = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_usd.pack(padx=20, pady=(0, 0), anchor="w")
+        self.lbl_vault_usd_sub = ctk.CTkLabel(c1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_vault_usd_sub.pack(padx=20, pady=(0, 20), anchor="w")
 
         c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 20))
         ctk.CTkLabel(c2, text="DZD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 20), anchor="w")
+        self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 0), anchor="w")
+        ctk.CTkLabel(c2, text=" ", font=("Roboto", 12), text_color="transparent").pack(padx=20, pady=(0, 20), anchor="w") 
 
         form_wrapper = ctk.CTkFrame(f, fg_color="transparent")
         form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
@@ -515,7 +528,6 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER).grid(row=2, column=0, columnspan=2, sticky="w", pady=(20, 10))
         self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
         self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
-
 
     # --- ACTIONS ---
     def add_income(self):
@@ -592,30 +604,69 @@ class FinancialTrackerApp(ctk.CTk):
 
     def create_list_row_modern(self, parent, t, simple=False):
         row = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=15); row.pack(fill="x", pady=4)
-        main_txt, sub_txt, amt_txt, col = "", "", "", COLOR_TEXT_MAIN
+        main_txt, sub_txt, amt_txt, amt_sub_txt, col = "", "", "", "", COLOR_TEXT_MAIN
+        
         display_date = t['date'][:16] 
+        disp_rate = self.data["settings"]["display_rate"]
         
         if t['type'] == 'income': 
             main_txt = t['category']
             dest = 'Local Cash' if t.get('currency') == 'DZD' else ('PayPal' if t.get('to_paypal') else 'Bank')
             sub_txt = f"{display_date} • {dest}"
-            amt_txt = f"+ {'DZD' if t.get('currency') == 'DZD' else '$'} {t['net_amount']:,.2f}"
+            if t.get('currency') == 'DZD':
+                amt_txt = f"+ {t['net_amount']:,.2f} DZD"
+            else:
+                amt_txt = f"+ ${t['net_amount']:,.2f}"
+                amt_sub_txt = f"≈ {t['net_amount'] * disp_rate:,.0f} DZD"
             col = COLOR_SUCCESS
+            
         elif t['type'] == 'expense': 
-            main_txt = t['category']; sub_txt = display_date; amt_txt = f"- {'$' if t['currency']=='USD' else 'DZD'} {t['amount']:,.2f}"; col = COLOR_DANGER
+            main_txt = t['category']; sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"- ${t['amount']:,.2f}"
+                amt_sub_txt = f"≈ {t['amount'] * disp_rate:,.0f} DZD"
+            else:
+                amt_txt = f"- {t['amount']:,.2f} DZD"
+            col = COLOR_DANGER
+            
         elif t['type'] == 'transfer_usd_dzd':
-            main_txt = "Sold USD"; sub_txt = f"{display_date} • Rate: {t.get('rate', '')}"; amt_txt = f"+ {t.get('amount_dzd', 0):,.2f} DZD"; col = COLOR_PRIMARY
+            main_txt = "Sold USD"; sub_txt = f"{display_date} • Rate: {t.get('rate', '')}"
+            amt_txt = f"+ {t.get('amount_dzd', 0):,.2f} DZD"
+            amt_sub_txt = f"- ${t.get('amount_usd', 0):,.2f}"
+            col = COLOR_PRIMARY
+            
         elif t['type'] == 'transfer_paypal_bank':
-            main_txt = "PayPal Transfer"; sub_txt = f"{display_date} • Fee: ${t.get('fee_paid', 0)}"; amt_txt = f"${t.get('amount_received', 0):,.2f}"; col = COLOR_WARNING
+            main_txt = "PayPal Transfer"; sub_txt = f"{display_date} • Fee: ${t.get('fee_paid', 0)}"
+            amt_txt = f"${t.get('amount_received', 0):,.2f}"
+            amt_sub_txt = f"≈ {t.get('amount_received', 0) * disp_rate:,.0f} DZD"
+            col = COLOR_WARNING
+            
         elif t['type'] == 'savings_deposit':
-            main_txt = "Locked to Savings"; sub_txt = display_date; amt_txt = f"{'DZD' if t['currency'] == 'DZD' else '$'} {t['amount']:,.2f}"; col = COLOR_SAVINGS
+            main_txt = "Locked to Savings"; sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"${t['amount']:,.2f}"
+                amt_sub_txt = f"≈ {t['amount'] * disp_rate:,.0f} DZD"
+            else:
+                amt_txt = f"{t['amount']:,.2f} DZD"
+            col = COLOR_SAVINGS
+            
         elif t['type'] == 'savings_withdraw':
-            main_txt = "Unlocked from Savings"; sub_txt = display_date; amt_txt = f"{'DZD' if t['currency'] == 'DZD' else '$'} {t['amount']:,.2f}"; col = COLOR_TEXT_SUB
+            main_txt = "Unlocked from Savings"; sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"${t['amount']:,.2f}"
+                amt_sub_txt = f"≈ {t['amount'] * disp_rate:,.0f} DZD"
+            else:
+                amt_txt = f"{t['amount']:,.2f} DZD"
+            col = COLOR_TEXT_SUB
         
         tf = ctk.CTkFrame(row, fg_color="transparent"); tf.pack(side="left", padx=15, pady=12)
         ctk.CTkLabel(tf, text=main_txt, font=("Roboto Medium", 14)).pack(anchor="w"); ctk.CTkLabel(tf, text=sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="w")
         if not simple: ctk.CTkButton(row, text="×", width=30, height=30, corner_radius=15, fg_color=COLOR_HOVER, hover_color=COLOR_DANGER, command=lambda: self.delete_transaction(t['id'])).pack(side="right", padx=(5, 15))
-        ctk.CTkLabel(row, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col).pack(side="right", padx=10)
+        
+        amt_f = ctk.CTkFrame(row, fg_color="transparent"); amt_f.pack(side="right", padx=10, pady=12)
+        ctk.CTkLabel(amt_f, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col).pack(anchor="e")
+        if amt_sub_txt:
+            ctk.CTkLabel(amt_f, text=amt_sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="e")
 
     def update_income_list(self): 
         for w in self.income_list_frame.winfo_children(): w.destroy()
