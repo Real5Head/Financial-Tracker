@@ -5,6 +5,9 @@ import os
 import uuid
 import sys
 import psycopg2
+import traceback
+import threading
+import queue   # <-- THE MAGIC FIX FOR MACOS
 from psycopg2.extras import Json
 from datetime import datetime
 
@@ -31,7 +34,7 @@ COLOR_HOVER = "#333333"
 COLOR_SUCCESS = "#2ecc71"    
 COLOR_DANGER = "#e74c3c"     
 COLOR_WARNING = "#f39c12"    
-COLOR_SAVINGS = "#9b59b6"    # Purple for Savings
+COLOR_SAVINGS = "#9b59b6"    
 COLOR_TEXT_MAIN = "#FFFFFF"
 COLOR_TEXT_SUB = "#A0A0A0"
 
@@ -44,28 +47,107 @@ class FinancialTrackerApp(ctk.CTk):
         self.minsize(1100, 750)
         self.configure(fg_color=COLOR_BG)
 
-        self.grid_columnconfigure(1, weight=1)
+        # 1. SETUP THREAD QUEUE
+        self.msg_queue = queue.Queue()
+
+        # 2. DRAW LOADING SCREEN IMMEDIATELY
+        self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        
+        self.loading_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.loading_frame.grid(row=0, column=0)
+        
+        self.lbl_loading = ctk.CTkLabel(self.loading_frame, text="Initializing Application...", font=FONT_HEADER, text_color=COLOR_TEXT_SUB)
+        self.lbl_loading.pack(pady=10)
 
         self.db_url = ""
         self.data = {"settings": {"display_rate": 200.0}, "transactions": []}
         self.config_file = os.path.expanduser("~/finance_tracker_db_config.json")
-        
         self.frames = {}
         self.nav_buttons = {}
 
-        self.after(100, self.check_db_connection)
+        # 3. START THE MAILBOX CHECKER & THE BACKGROUND WORKER
+        self.after(100, self.process_queue)
+        self.after(200, self.run_startup)
 
-    # --- STARTUP LOGIC ---
-    def check_db_connection(self):
-        if os.path.exists(self.config_file):
-            try:
+    # --- THREAD QUEUE PROCESSOR (RUNS ON MAIN THREAD ONLY) ---
+    def process_queue(self):
+        """Constantly checks the mailbox for messages from the background thread."""
+        try:
+            while True:
+                msg_type, msg_data = self.msg_queue.get_nowait()
+                
+                if msg_type == "LOADING_TEXT":
+                    if hasattr(self, 'lbl_loading') and self.lbl_loading.winfo_exists():
+                        self.lbl_loading.configure(text=msg_data)
+                elif msg_type == "START_APP":
+                    self.start_full_app()
+                elif msg_type == "SHOW_SETUP":
+                    self.show_setup_screen()
+                elif msg_type == "FATAL_ERROR":
+                    self.show_fatal_error(msg_data)
+                elif msg_type == "SETUP_ERROR":
+                    if hasattr(self, 'lbl_setup_error') and self.lbl_setup_error.winfo_exists():
+                        self.lbl_setup_error.configure(text=msg_data, text_color=COLOR_DANGER)
+                        
+        except queue.Empty:
+            pass # No messages right now
+            
+        # Check again in 100ms
+        self.after(100, self.process_queue)
+
+    # --- STARTUP LOGIC (BACKGROUND WORKERS) ---
+    def run_startup(self):
+        threading.Thread(target=self._bg_startup_task, daemon=True).start()
+
+    def _bg_startup_task(self):
+        """This runs entirely in the background. NO UI code allowed here!"""
+        try:
+            if os.path.exists(self.config_file):
                 with open(self.config_file, "r") as f:
                     self.db_url = json.load(f).get("db_url", "").strip()
-                with psycopg2.connect(self.db_url) as conn: pass 
-                self.start_full_app()
-                return
-            except Exception: pass 
+                
+                if self.db_url:
+                    self.msg_queue.put(("LOADING_TEXT", "Waking up Database..."))
+                    
+                    with psycopg2.connect(self.db_url, connect_timeout=15) as conn:
+                        self.msg_queue.put(("LOADING_TEXT", "Downloading your data..."))
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
+                            row = cur.fetchone()
+                            if row: self.data["settings"]["display_rate"] = float(row[0])
+                            
+                            cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
+                            rows = cur.fetchall()
+                            self.data["transactions"] = [r[0] for r in rows]
+                    
+                    self.msg_queue.put(("LOADING_TEXT", "Building Interface..."))
+                    self.msg_queue.put(("START_APP", None))
+                    return
+                    
+            self.msg_queue.put(("SHOW_SETUP", None))
+        except Exception as e:
+            self.msg_queue.put(("FATAL_ERROR", f"Startup Error:\n{e}\n\nPlease check your internet connection or DB link."))
+
+    def show_fatal_error(self, message):
+        for widget in self.winfo_children(): widget.destroy()
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0)
+        
+        err_frame = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=20)
+        err_frame.grid(row=0, column=0, padx=50, pady=50)
+        ctk.CTkLabel(err_frame, text="⚠️ Connection or Load Error", font=FONT_HEADER, text_color=COLOR_DANGER).pack(pady=(40, 10))
+        ctk.CTkLabel(err_frame, text="The app could not connect or encountered bad data.", font=FONT_BOLD, text_color=COLOR_TEXT_SUB).pack()
+        
+        err_box = ctk.CTkTextbox(err_frame, width=700, height=200, fg_color=COLOR_INPUT, text_color="white")
+        err_box.pack(padx=40, pady=20)
+        err_box.insert("1.0", str(message))
+        err_box.configure(state="disabled")
+        
+        ctk.CTkButton(err_frame, text="Reset Database Link", fg_color=COLOR_WARNING, hover_color=COLOR_DANGER, command=self.reset_db).pack(pady=(10, 40))
+
+    def reset_db(self):
+        if os.path.exists(self.config_file): os.remove(self.config_file)
         self.show_setup_screen()
 
     def show_setup_screen(self):
@@ -83,68 +165,88 @@ class FinancialTrackerApp(ctk.CTk):
 
     def attempt_connection(self):
         url = self.entry_db_url.get().strip()
-        if not url: self.lbl_setup_error.configure(text="Please enter a valid URL."); return
-        if "sslmode=require" not in url: url += "&sslmode=require" if "?" in url else "?sslmode=require"
+        if not url: 
+            self.lbl_setup_error.configure(text="Please enter a valid URL.")
+            return
+        if "sslmode=require" not in url: 
+            url += "&sslmode=require" if "?" in url else "?sslmode=require"
+        
         self.lbl_setup_error.configure(text="Connecting... (This may take a few seconds)", text_color=COLOR_WARNING)
-        self.update() 
+        
+        threading.Thread(target=self._bg_connect_task, args=(url,), daemon=True).start()
+
+    def _bg_connect_task(self, url):
         try:
-            with psycopg2.connect(url) as conn:
+            with psycopg2.connect(url, connect_timeout=15) as conn:
                 with conn.cursor() as cur:
                     cur.execute("CREATE TABLE IF NOT EXISTS settings (key VARCHAR(50) PRIMARY KEY, value FLOAT)")
                     cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
                     cur.execute("INSERT INTO settings (key, value) VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING")
+                    
+                    # Fetch data immediately if linking to an existing DB
+                    cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
+                    row = cur.fetchone()
+                    if row: self.data["settings"]["display_rate"] = float(row[0])
+                    
+                    cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
+                    rows = cur.fetchall()
+                    self.data["transactions"] = [r[0] for r in rows]
                 conn.commit()
+            
+            with open(self.config_file, "w") as f: json.dump({"db_url": url}, f)
             self.db_url = url
-            with open(self.config_file, "w") as f: json.dump({"db_url": self.db_url}, f)
-            self.start_full_app()
-        except Exception as e:
-            self.lbl_setup_error.configure(text="Connection failed. Check your link or internet.", text_color=COLOR_DANGER)
+            self.msg_queue.put(("START_APP", None))
+        except Exception:
+            self.msg_queue.put(("SETUP_ERROR", "Connection failed. Check your link or internet."))
 
     def start_full_app(self):
-        for widget in self.winfo_children(): widget.destroy()
-        self.grid_columnconfigure(0, weight=0) 
-        self.grid_columnconfigure(1, weight=1)
+        try:
+            # Safely build the UI entirely on the Main Thread
+            for widget in self.winfo_children(): widget.destroy()
+            self.grid_columnconfigure(0, weight=0) 
+            self.grid_columnconfigure(1, weight=1)
 
-        self.current_date = datetime.now()
-        self.selected_month = self.current_date.month
-        self.selected_year = self.current_date.year
+            self.current_date = datetime.now()
+            self.selected_month = self.current_date.month
+            self.selected_year = self.current_date.year
 
-        self.data = self.fetch_data_from_db()
+            self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
+            self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+            self.sidebar_frame.grid_rowconfigure(7, weight=1) 
+            self.create_sidebar()
 
-        self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
-        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(7, weight=1) 
-        self.create_sidebar()
+            self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+            self.main_frame.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
+            self.main_frame.grid_columnconfigure(0, weight=1)
+            self.main_frame.grid_rowconfigure(0, weight=1)
 
-        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(0, weight=1)
+            self.create_dashboard_frame()
+            self.create_income_frame()
+            self.create_transfer_frame()
+            self.create_expenses_frame()
+            self.create_savings_frame()
 
-        self.create_dashboard_frame()
-        self.create_income_frame()
-        self.create_transfer_frame()
-        self.create_expenses_frame()
-        self.create_savings_frame()
-
-        self.show_frame("dashboard")
+            self.show_frame("dashboard", fetch_data=False) 
+        except Exception as e:
+            self.show_fatal_error(f"UI Build Error:\n{traceback.format_exc()}")
 
     # --- DATABASE OPERATIONS ---
-    def get_db_connection(self): return psycopg2.connect(self.db_url)
+    def get_db_connection(self): 
+        return psycopg2.connect(self.db_url, connect_timeout=10)
 
     def fetch_data_from_db(self):
-        data = {"settings": {"display_rate": 200.0}, "transactions": []}
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
                     row = cur.fetchone()
-                    if row: data["settings"]["display_rate"] = row[0]
+                    if row: self.data["settings"]["display_rate"] = float(row[0])
                     cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
                     rows = cur.fetchall()
-                    data["transactions"] = [r[0] for r in rows]
-        except Exception: self.show_error_native("Could not fetch data from database.")
-        return data
+                    self.data["transactions"] = [r[0] for r in rows]
+        except Exception as e: 
+            self.show_error_native(f"Could not sync with database. Using cached data.")
+        return self.data
 
     def add_transaction_to_db(self, t):
         self.data["transactions"].append(t) 
@@ -167,7 +269,7 @@ class FinancialTrackerApp(ctk.CTk):
         
         def confirm():
             dialog.destroy()
-            self.data["transactions"] = [t for t in self.data["transactions"] if t.get("id") != tid]
+            self.data["transactions"] = [t for t in self.data["transactions"] if t.get("id", "") != tid]
             try:
                 with self.get_db_connection() as conn:
                     with conn.cursor() as cur: cur.execute("DELETE FROM transactions WHERE id = %s", (tid,))
@@ -223,19 +325,19 @@ class FinancialTrackerApp(ctk.CTk):
         self.entry_display_rate.pack(fill="x", pady=(0, 10))
         ctk.CTkButton(settings_frame, text="Update Rate", height=35, corner_radius=17, fg_color=COLOR_HOVER, hover_color="#444", font=("Roboto", 12), command=self.update_display_rate).pack(fill="x")
 
-    def show_frame(self, name):
+    def show_frame(self, name, fetch_data=True):
         for frame in self.frames.values(): frame.grid_forget()
         self.frames[name].grid(row=0, column=0, sticky="nsew")
         for btn_name, btn in self.nav_buttons.items():
             btn.configure(fg_color=COLOR_HOVER if btn_name == name else "transparent", text_color="white" if btn_name == name else COLOR_TEXT_SUB)
         
-        # If returning to dashboard, reset to current month
         if name == "dashboard":
             self.current_date = datetime.now()
             self.selected_month = self.current_date.month
             self.selected_year = self.current_date.year
 
-        self.data = self.fetch_data_from_db() 
+        if fetch_data:
+            self.data = self.fetch_data_from_db() 
         self.refresh_ui()
 
     def get_monthly_key(self): return f"{self.selected_year}-{self.selected_month:02d}"
@@ -250,70 +352,78 @@ class FinancialTrackerApp(ctk.CTk):
         }
         for t in self.data["transactions"]:
             curr = t.get('currency', 'USD')
-            # Balances
-            if t['type'] == 'income':
-                if t.get('to_paypal', False) and curr == 'USD': stats['paypal_balance'] += t['net_amount']
-                else: 
-                    if curr == 'USD': stats['usd_savings'] += t['net_amount']
-                    else: stats['dzd_cash'] += t['net_amount']
-            elif t['type'] == 'expense':
-                if curr == 'USD': stats['usd_savings'] -= t['amount']
-                else: stats['dzd_cash'] -= t['amount']
-            elif t['type'] == 'transfer_usd_dzd':
-                stats['usd_savings'] -= t['amount_usd']; stats['dzd_cash'] += t['amount_dzd']
-            elif t['type'] == 'transfer_paypal_bank':
-                stats['paypal_balance'] -= t['amount_sent']; stats['usd_savings'] += t['amount_received']
-            elif t['type'] == 'savings_deposit':
-                if curr == 'USD': stats['usd_savings'] -= t['amount']; stats['usd_locked'] += t['amount']
-                else: stats['dzd_cash'] -= t['amount']; stats['dzd_locked'] += t['amount']
-            elif t['type'] == 'savings_withdraw':
-                if curr == 'USD': stats['usd_savings'] += t['amount']; stats['usd_locked'] -= t['amount']
-                else: stats['dzd_cash'] += t['amount']; stats['dzd_locked'] -= t['amount']
+            t_type = t.get('type', 'unknown')
+            t_date = str(t.get('date', 'Unknown Date'))
+            
+            base_amt = float(t.get('amount', 0.0))
+            net_amt = float(t.get('net_amount', base_amt))
 
-            # Monthly filtering
-            if t['date'].startswith(target_month):
-                if t['type'] == 'income': 
-                    if curr == 'USD': stats['month_earned_usd'] += t['net_amount']
-                    else: stats['month_earned_dzd'] += t['net_amount']
-                elif t['type'] == 'expense':
-                    if curr == 'USD': stats['month_spent_usd'] += t['amount']
-                    else: stats['month_spent_dzd'] += t['amount']
+            if t_type == 'income':
+                if t.get('to_paypal', False) and curr == 'USD': stats['paypal_balance'] += net_amt
+                else: 
+                    if curr == 'USD': stats['usd_savings'] += net_amt
+                    else: stats['dzd_cash'] += net_amt
+            elif t_type == 'expense':
+                if curr == 'USD': stats['usd_savings'] -= base_amt
+                else: stats['dzd_cash'] -= base_amt
+            elif t_type == 'transfer_usd_dzd':
+                stats['usd_savings'] -= float(t.get('amount_usd', 0.0)); stats['dzd_cash'] += float(t.get('amount_dzd', 0.0))
+            elif t_type == 'transfer_paypal_bank':
+                stats['paypal_balance'] -= float(t.get('amount_sent', 0.0)); stats['usd_savings'] += float(t.get('amount_received', 0.0))
+            elif t_type == 'savings_deposit':
+                if curr == 'USD': stats['usd_savings'] -= base_amt; stats['usd_locked'] += base_amt
+                else: stats['dzd_cash'] -= base_amt; stats['dzd_locked'] += base_amt
+            elif t_type == 'savings_withdraw':
+                if curr == 'USD': stats['usd_savings'] += base_amt; stats['usd_locked'] -= base_amt
+                else: stats['dzd_cash'] += base_amt; stats['dzd_locked'] -= base_amt
+
+            if t_date.startswith(target_month):
+                if t_type == 'income': 
+                    if curr == 'USD': stats['month_earned_usd'] += net_amt
+                    else: stats['month_earned_dzd'] += net_amt
+                elif t_type == 'expense':
+                    if curr == 'USD': stats['month_spent_usd'] += base_amt
+                    else: stats['month_spent_dzd'] += base_amt
         return stats
 
     def refresh_ui(self):
-        stats = self.calculate_stats(); disp_rate = self.data["settings"]["display_rate"]
-        
-        # Dashboard Balances
-        self.lbl_paypal.configure(text=f"${stats['paypal_balance']:,.2f}")
-        self.lbl_usd_savings.configure(text=f"${stats['usd_savings']:,.2f}")
-        self.lbl_dzd_cash.configure(text=f"{stats['dzd_cash']:,.2f} DZD")
-        
-        # Monthly Stats
-        earn_txt = f"+ ${stats['month_earned_usd']:,.2f}" if stats['month_earned_dzd'] == 0 else f"+ ${stats['month_earned_usd']:,.2f}  |  + {stats['month_earned_dzd']:,.0f} DZD"
-        self.lbl_month_earned.configure(text=earn_txt)
-        self.lbl_month_spent_usd.configure(text=f"${stats['month_spent_usd']:,.2f}")
-        self.lbl_month_spent_dzd.configure(text=f"{stats['month_spent_dzd']:,.2f} DZD")
-        
-        # Net Worth
-        total_usd = stats['usd_savings'] + stats['paypal_balance'] + stats['usd_locked']
-        total_dzd = stats['dzd_cash'] + stats['dzd_locked']
-        nw_usd = total_usd + (total_dzd / disp_rate if disp_rate > 0 else 0)
-        nw_dzd = total_dzd + (total_usd * disp_rate)
-        
-        self.lbl_header_nw.configure(text=f"${nw_usd:,.2f}  |  ≈ {nw_dzd:,.0f} DZD")
-        self.lbl_month_selector.configure(text=f"{datetime(self.selected_year, self.selected_month, 1).strftime('%B')}")
-        self.lbl_year_selector.configure(text=f"{self.selected_year}")
+        try:
+            stats = self.calculate_stats()
+            disp_rate = float(self.data["settings"].get("display_rate", 200.0))
+            
+            self.lbl_paypal.configure(text=f"${stats['paypal_balance']:,.2f}")
+            self.lbl_usd_savings.configure(text=f"${stats['usd_savings']:,.2f}")
+            self.lbl_dzd_cash.configure(text=f"{stats['dzd_cash']:,.2f} DZD")
+            
+            earn_txt = f"+ ${stats['month_earned_usd']:,.2f}" if stats['month_earned_dzd'] == 0 else f"+ ${stats['month_earned_usd']:,.2f}  |  + {stats['month_earned_dzd']:,.0f} DZD"
+            self.lbl_month_earned.configure(text=earn_txt)
+            
+            self.lbl_month_spent_usd.configure(text=f"${stats['month_spent_usd']:,.2f}")
+            self.lbl_month_spent_usd_sub.configure(text=f"≈ {stats['month_spent_usd'] * disp_rate:,.0f} DZD")
+            
+            self.lbl_month_spent_dzd.configure(text=f"{stats['month_spent_dzd']:,.2f} DZD")
+            
+            total_usd = stats['usd_savings'] + stats['paypal_balance'] + stats['usd_locked']
+            total_dzd = stats['dzd_cash'] + stats['dzd_locked']
+            nw_usd = total_usd + (total_dzd / disp_rate if disp_rate > 0 else 0)
+            nw_dzd = total_dzd + (total_usd * disp_rate)
+            
+            self.lbl_header_nw.configure(text=f"${nw_usd:,.2f}  |  ≈ {nw_dzd:,.0f} DZD")
+            self.lbl_month_selector.configure(text=f"{datetime(self.selected_year, self.selected_month, 1).strftime('%B')}")
+            self.lbl_year_selector.configure(text=f"{self.selected_year}")
 
-        # Savings Tab Balances
-        if "savings" in self.frames:
-            self.lbl_vault_usd.configure(text=f"${stats['usd_locked']:,.2f}")
-            self.lbl_vault_dzd.configure(text=f"{stats['dzd_locked']:,.2f} DZD")
+            if "savings" in self.frames:
+                self.lbl_vault_usd.configure(text=f"${stats['usd_locked']:,.2f}")
+                self.lbl_vault_usd_sub.configure(text=f"≈ {stats['usd_locked'] * disp_rate:,.0f} DZD")
+                self.lbl_vault_dzd.configure(text=f"{stats['dzd_locked']:,.2f} DZD")
 
-        self.update_income_list()
-        self.update_expense_list()
-        self.update_transfer_list()
-        self.update_savings_list()
-        self.update_dashboard_history()
+            self.update_income_list()
+            self.update_expense_list()
+            self.update_transfer_list()
+            self.update_savings_list()
+            self.update_dashboard_history()
+        except Exception as e:
+            self.show_fatal_error(traceback.format_exc())
 
     def change_time(self, unit, direction):
         if unit == 'month':
@@ -354,9 +464,16 @@ class FinancialTrackerApp(ctk.CTk):
         c2 = ctk.CTkFrame(row1, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0))
         ctk.CTkLabel(c2, text="EXPENSES THIS MONTH", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         c2i = ctk.CTkFrame(c2, fg_color="transparent"); c2i.pack(padx=20, pady=(0, 20), anchor="w")
-        self.lbl_month_spent_usd = ctk.CTkLabel(c2i, text="$0.00", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_usd.pack(side="left")
-        ctk.CTkLabel(c2i, text="  |  ", font=("Roboto", 20), text_color=COLOR_TEXT_SUB).pack(side="left")
-        self.lbl_month_spent_dzd = ctk.CTkLabel(c2i, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_dzd.pack(side="left")
+        
+        g1 = ctk.CTkFrame(c2i, fg_color="transparent"); g1.pack(side="left")
+        self.lbl_month_spent_usd = ctk.CTkLabel(g1, text="$0.00", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_usd.pack(anchor="w")
+        self.lbl_month_spent_usd_sub = ctk.CTkLabel(g1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_month_spent_usd_sub.pack(anchor="w")
+        
+        ctk.CTkLabel(c2i, text="  |  ", font=("Roboto", 20), text_color=COLOR_TEXT_SUB).pack(side="left", padx=15)
+        
+        g2 = ctk.CTkFrame(c2i, fg_color="transparent"); g2.pack(side="left")
+        self.lbl_month_spent_dzd = ctk.CTkLabel(g2, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_dzd.pack(anchor="w")
+        ctk.CTkLabel(g2, text=" ", font=("Roboto", 12), text_color="transparent").pack(anchor="w") 
 
         row2 = ctk.CTkFrame(frame, fg_color="transparent"); row2.grid(row=2, column=0, sticky="ew", pady=(0, 25)); row2.grid_columnconfigure((0, 1, 2), weight=1, uniform="g2")
         c3 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20); c3.grid(row=0, column=0, sticky="ew", padx=(0, 10))
@@ -371,7 +488,6 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(c5, text="LOCAL CASH (AVAILABLE)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_dzd_cash = ctk.CTkLabel(c5, text="--", font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN); self.lbl_dzd_cash.pack(padx=20, pady=(0, 20), anchor="w")
 
-        # Filters & History
         filter_row = ctk.CTkFrame(frame, fg_color="transparent")
         filter_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         ctk.CTkLabel(filter_row, text="Transactions this Month", font=FONT_SUBHEADER).pack(side="left")
@@ -392,25 +508,26 @@ class FinancialTrackerApp(ctk.CTk):
 
         filtered = []
         for t in self.data["transactions"]:
-            if not t['date'].startswith(target_month): continue
+            t_date = str(t.get('date', ''))
+            t_type_val = str(t.get('type', ''))
+            if not t_date.startswith(target_month): continue
             
             is_match = False
             if f_type == "All Types": is_match = True
-            elif f_type == "Income" and t['type'] == 'income': is_match = True
-            elif f_type == "Expense" and t['type'] == 'expense': is_match = True
-            elif f_type == "Transfer" and 'transfer' in t['type']: is_match = True
-            elif f_type == "Savings" and 'savings' in t['type']: is_match = True
+            elif f_type == "Income" and t_type_val == 'income': is_match = True
+            elif f_type == "Expense" and t_type_val == 'expense': is_match = True
+            elif f_type == "Transfer" and 'transfer' in t_type_val: is_match = True
+            elif f_type == "Savings" and 'savings' in t_type_val: is_match = True
             
             if is_match: filtered.append(t)
 
-        if f_sort == "Newest First": filtered.sort(key=lambda x: x['date'], reverse=True)
-        elif f_sort == "Oldest First": filtered.sort(key=lambda x: x['date'])
-        elif f_sort == "Highest Amount": filtered.sort(key=lambda x: x.get('amount', x.get('amount_usd', x.get('amount_sent', 0))), reverse=True)
-        elif f_sort == "Lowest Amount": filtered.sort(key=lambda x: x.get('amount', x.get('amount_usd', x.get('amount_sent', 0))))
+        if f_sort == "Newest First": filtered.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+        elif f_sort == "Oldest First": filtered.sort(key=lambda x: str(x.get('date', '')))
+        elif f_sort == "Highest Amount": filtered.sort(key=lambda x: float(x.get('amount', x.get('amount_usd', x.get('amount_sent', 0)))), reverse=True)
+        elif f_sort == "Lowest Amount": filtered.sort(key=lambda x: float(x.get('amount', x.get('amount_usd', x.get('amount_sent', 0)))))
 
         for t in filtered: self.create_list_row_modern(self.dashboard_history_frame, t, simple=True)
 
-    # --- FORMS ---
     def create_form_container(self, parent, title):
         parent.grid_columnconfigure(0, weight=1); parent.grid_rowconfigure(1, weight=1)
         ctk.CTkLabel(parent, text=title, font=FONT_HEADER).grid(row=0, column=0, sticky="w", pady=(0, 20))
@@ -455,14 +572,12 @@ class FinancialTrackerApp(ctk.CTk):
 
     def create_transfer_frame(self):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["transfer"] = f
-        
         tv = ctk.CTkTabview(f, fg_color="transparent", segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_PRIMARY, corner_radius=20)
         tv.pack(fill="x", expand=False) 
         
         t1 = tv.add("PayPal -> Bank"); t2 = tv.add("Sell USD -> DZD")
         
         c1 = ctk.CTkFrame(t1, fg_color="transparent"); c1.pack(fill="x", padx=20, pady=10)
-        
         pp_amt_row = ctk.CTkFrame(c1, fg_color="transparent"); pp_amt_row.pack(fill="x", pady=10)
         self.entry_pp_amount = self.create_input(pp_amt_row, "Amount ($)"); self.entry_pp_amount.pack(side="left", fill="x", expand=True, padx=(0, 10))
         ctk.CTkButton(pp_amt_row, text="Max", width=60, height=45, corner_radius=22, fg_color=COLOR_INPUT, hover_color=COLOR_HOVER, command=self.fill_max_paypal).pack(side="right")
@@ -491,19 +606,19 @@ class FinancialTrackerApp(ctk.CTk):
 
     def create_savings_frame(self):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["savings"] = f
-        f.grid_columnconfigure((0, 1), weight=1)
-        f.grid_rowconfigure(3, weight=1) 
+        f.grid_columnconfigure((0, 1), weight=1); f.grid_rowconfigure(3, weight=1) 
 
         c1 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c1.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 20))
         ctk.CTkLabel(c1, text="USD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_vault_usd = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_usd.pack(padx=20, pady=(0, 20), anchor="w")
+        self.lbl_vault_usd = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_usd.pack(padx=20, pady=(0, 0), anchor="w")
+        self.lbl_vault_usd_sub = ctk.CTkLabel(c1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_vault_usd_sub.pack(padx=20, pady=(0, 20), anchor="w")
 
         c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 20))
         ctk.CTkLabel(c2, text="DZD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 20), anchor="w")
+        self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 0), anchor="w")
+        ctk.CTkLabel(c2, text=" ", font=("Roboto", 12), text_color="transparent").pack(padx=20, pady=(0, 20), anchor="w") 
 
-        form_wrapper = ctk.CTkFrame(f, fg_color="transparent")
-        form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        form_wrapper = ctk.CTkFrame(f, fg_color="transparent"); form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
 
         form = self.create_form_container(form_wrapper, "Manage Savings")
         self.combo_sav_action = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Lock into Savings", "Withdraw to Available"]); self.combo_sav_action.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
@@ -513,20 +628,13 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkButton(form, text="Confirm", height=50, corner_radius=25, fg_color=COLOR_SAVINGS, font=FONT_BOLD, command=self.manage_savings).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
 
         ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER).grid(row=2, column=0, columnspan=2, sticky="w", pady=(20, 10))
-        self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
-        self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
-
+        self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent"); self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
 
     # --- ACTIONS ---
     def add_income(self):
         try:
-            val = float(self.entry_inc_amount.get())
-            curr = "DZD" if "DZD" in self.combo_inc_curr.get() else "USD"
-            
-            if curr == "DZD":
-                fee = 0.0
-                fee_type = "No Fee"
-                to_paypal = False
+            val = float(self.entry_inc_amount.get()); curr = "DZD" if "DZD" in self.combo_inc_curr.get() else "USD"
+            if curr == "DZD": fee = 0.0; fee_type = "No Fee"; to_paypal = False
             else:
                 fee_type = self.combo_fee_type.get()
                 fee = float(self.entry_fee_val.get()) if "Manual" in fee_type else (val*0.1 if "Upwork" in fee_type else 0)
@@ -571,11 +679,8 @@ class FinancialTrackerApp(ctk.CTk):
 
     def manage_savings(self):
         try:
-            amt = float(self.entry_sav_amount.get())
-            curr = self.combo_sav_curr.get()
-            action = self.combo_sav_action.get()
-            t_type = 'savings_deposit' if 'Lock' in action else 'savings_withdraw'
-            s = self.calculate_stats()
+            amt = float(self.entry_sav_amount.get()); curr = self.combo_sav_curr.get(); action = self.combo_sav_action.get()
+            t_type = 'savings_deposit' if 'Lock' in action else 'savings_withdraw'; s = self.calculate_stats()
 
             if t_type == 'savings_deposit':
                 if curr == 'USD' and s['usd_savings'] < amt: self.show_error_native("Insufficient Bank USD to lock."); return
@@ -592,51 +697,83 @@ class FinancialTrackerApp(ctk.CTk):
 
     def create_list_row_modern(self, parent, t, simple=False):
         row = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=15); row.pack(fill="x", pady=4)
-        main_txt, sub_txt, amt_txt, col = "", "", "", COLOR_TEXT_MAIN
-        display_date = t['date'][:16] 
+        main_txt, sub_txt, amt_txt, amt_sub_txt, col = "", "", "", "", COLOR_TEXT_MAIN
         
-        if t['type'] == 'income': 
-            main_txt = t['category']
+        t_type = t.get('type', 'unknown')
+        t_date = str(t.get('date', 'Unknown Date'))
+        display_date = t_date[:16] if t_date != 'Unknown Date' else t_date
+        disp_rate = float(self.data["settings"].get("display_rate", 200.0))
+        
+        net_amt = float(t.get('net_amount', t.get('amount', 0.0)))
+        base_amt = float(t.get('amount', 0.0))
+
+        if t_type == 'income': 
+            main_txt = str(t.get('category', 'Income'))
             dest = 'Local Cash' if t.get('currency') == 'DZD' else ('PayPal' if t.get('to_paypal') else 'Bank')
             sub_txt = f"{display_date} • {dest}"
-            amt_txt = f"+ {'DZD' if t.get('currency') == 'DZD' else '$'} {t['net_amount']:,.2f}"
+            if t.get('currency') == 'DZD': amt_txt = f"+ {net_amt:,.2f} DZD"
+            else: amt_txt = f"+ ${net_amt:,.2f}"; amt_sub_txt = f"≈ {net_amt * disp_rate:,.0f} DZD"
             col = COLOR_SUCCESS
-        elif t['type'] == 'expense': 
-            main_txt = t['category']; sub_txt = display_date; amt_txt = f"- {'$' if t['currency']=='USD' else 'DZD'} {t['amount']:,.2f}"; col = COLOR_DANGER
-        elif t['type'] == 'transfer_usd_dzd':
-            main_txt = "Sold USD"; sub_txt = f"{display_date} • Rate: {t.get('rate', '')}"; amt_txt = f"+ {t.get('amount_dzd', 0):,.2f} DZD"; col = COLOR_PRIMARY
-        elif t['type'] == 'transfer_paypal_bank':
-            main_txt = "PayPal Transfer"; sub_txt = f"{display_date} • Fee: ${t.get('fee_paid', 0)}"; amt_txt = f"${t.get('amount_received', 0):,.2f}"; col = COLOR_WARNING
-        elif t['type'] == 'savings_deposit':
-            main_txt = "Locked to Savings"; sub_txt = display_date; amt_txt = f"{'DZD' if t['currency'] == 'DZD' else '$'} {t['amount']:,.2f}"; col = COLOR_SAVINGS
-        elif t['type'] == 'savings_withdraw':
-            main_txt = "Unlocked from Savings"; sub_txt = display_date; amt_txt = f"{'DZD' if t['currency'] == 'DZD' else '$'} {t['amount']:,.2f}"; col = COLOR_TEXT_SUB
+            
+        elif t_type == 'expense': 
+            main_txt = str(t.get('category', 'Expense')); sub_txt = display_date
+            if t.get('currency') == 'USD': amt_txt = f"- ${base_amt:,.2f}"; amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
+            else: amt_txt = f"- {base_amt:,.2f} DZD"
+            col = COLOR_DANGER
+            
+        elif t_type == 'transfer_usd_dzd':
+            main_txt = "Sold USD"; sub_txt = f"{display_date} • Rate: {t.get('rate', '')}"
+            amt_txt = f"+ {float(t.get('amount_dzd', 0)):,.2f} DZD"; amt_sub_txt = f"- ${float(t.get('amount_usd', 0)):,.2f}"
+            col = COLOR_PRIMARY
+            
+        elif t_type == 'transfer_paypal_bank':
+            main_txt = "PayPal Transfer"; sub_txt = f"{display_date} • Fee: ${float(t.get('fee_paid', 0))}"
+            amt_txt = f"${float(t.get('amount_received', 0)):,.2f}"; amt_sub_txt = f"≈ {float(t.get('amount_received', 0)) * disp_rate:,.0f} DZD"
+            col = COLOR_WARNING
+            
+        elif t_type == 'savings_deposit':
+            main_txt = "Locked to Savings"; sub_txt = display_date
+            if t.get('currency') == 'USD': amt_txt = f"${base_amt:,.2f}"; amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
+            else: amt_txt = f"{base_amt:,.2f} DZD"
+            col = COLOR_SAVINGS
+            
+        elif t_type == 'savings_withdraw':
+            main_txt = "Unlocked from Savings"; sub_txt = display_date
+            if t.get('currency') == 'USD': amt_txt = f"${base_amt:,.2f}"; amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
+            else: amt_txt = f"{base_amt:,.2f} DZD"
+            col = COLOR_TEXT_SUB
+
+        elif 'transfer' in t_type or t_type == 'transfer':
+            main_txt = "Legacy Transfer"; sub_txt = display_date; amt_txt = "Processed"; col = COLOR_PRIMARY
         
         tf = ctk.CTkFrame(row, fg_color="transparent"); tf.pack(side="left", padx=15, pady=12)
         ctk.CTkLabel(tf, text=main_txt, font=("Roboto Medium", 14)).pack(anchor="w"); ctk.CTkLabel(tf, text=sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="w")
-        if not simple: ctk.CTkButton(row, text="×", width=30, height=30, corner_radius=15, fg_color=COLOR_HOVER, hover_color=COLOR_DANGER, command=lambda: self.delete_transaction(t['id'])).pack(side="right", padx=(5, 15))
-        ctk.CTkLabel(row, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col).pack(side="right", padx=10)
+        if not simple: ctk.CTkButton(row, text="×", width=30, height=30, corner_radius=15, fg_color=COLOR_HOVER, hover_color=COLOR_DANGER, command=lambda _id=t.get('id', ''): self.delete_transaction(_id)).pack(side="right", padx=(5, 15))
+        
+        amt_f = ctk.CTkFrame(row, fg_color="transparent"); amt_f.pack(side="right", padx=10, pady=12)
+        ctk.CTkLabel(amt_f, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col).pack(anchor="e")
+        if amt_sub_txt: ctk.CTkLabel(amt_f, text=amt_sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="e")
 
     def update_income_list(self): 
         for w in self.income_list_frame.winfo_children(): w.destroy()
         for t in reversed(self.data["transactions"]): 
-            if t['type'] == 'income' and t['date'].startswith(self.get_monthly_key()): self.create_list_row_modern(self.income_list_frame, t)
+            if t.get('type') == 'income' and str(t.get('date', '')).startswith(self.get_monthly_key()): self.create_list_row_modern(self.income_list_frame, t)
     
     def update_expense_list(self):
         for w in self.expense_list_frame.winfo_children(): w.destroy()
         for t in reversed(self.data["transactions"]): 
-            if t['type'] == 'expense' and t['date'].startswith(self.get_monthly_key()): self.create_list_row_modern(self.expense_list_frame, t)
+            if t.get('type') == 'expense' and str(t.get('date', '')).startswith(self.get_monthly_key()): self.create_list_row_modern(self.expense_list_frame, t)
 
     def update_transfer_list(self):
         for w in self.transfer_list_frame.winfo_children(): w.destroy()
         for t in reversed(self.data["transactions"]): 
-            if 'transfer' in t['type']: self.create_list_row_modern(self.transfer_list_frame, t)
+            if 'transfer' in str(t.get('type', '')): self.create_list_row_modern(self.transfer_list_frame, t)
 
     def update_savings_list(self):
         if not hasattr(self, 'savings_list_frame'): return
         for w in self.savings_list_frame.winfo_children(): w.destroy()
         for t in reversed(self.data["transactions"]): 
-            if 'savings' in t['type']: self.create_list_row_modern(self.savings_list_frame, t)
+            if 'savings' in str(t.get('type', '')): self.create_list_row_modern(self.savings_list_frame, t)
 
 if __name__ == "__main__":
     app = FinancialTrackerApp()
