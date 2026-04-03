@@ -45,17 +45,30 @@ class FinancialTrackerApp(ctk.CTk):
         self.minsize(1100, 750)
         self.configure(fg_color=COLOR_BG)
 
-        self.grid_columnconfigure(1, weight=1)
+        # 1. DRAW A LOADING SCREEN IMMEDIATELY (Prevents the black screen)
+        self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        
+        self.loading_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.loading_frame.grid(row=0, column=0)
+        
+        self.lbl_loading = ctk.CTkLabel(self.loading_frame, text="Waking up Database...", font=FONT_HEADER, text_color=COLOR_TEXT_SUB)
+        self.lbl_loading.pack(pady=10)
+        self.lbl_sub_loading = ctk.CTkLabel(self.loading_frame, text="This may take a few seconds if Neon DB is asleep.", font=FONT_MAIN, text_color="#555555")
+        self.lbl_sub_loading.pack()
 
+        # Force Tkinter to draw the UI right now before doing any background tasks
+        self.update() 
+
+        # 2. Set up variables
         self.db_url = ""
         self.data = {"settings": {"display_rate": 200.0}, "transactions": []}
         self.config_file = os.path.expanduser("~/finance_tracker_db_config.json")
-        
         self.frames = {}
         self.nav_buttons = {}
 
-        self.after(100, self.check_db_connection)
+        # 3. Start DB check after a tiny delay
+        self.after(200, self.check_db_connection)
 
     # --- CRASH HANDLER ---
     def show_fatal_error(self, message):
@@ -64,10 +77,9 @@ class FinancialTrackerApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         err_frame = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=20)
         err_frame.grid(row=0, column=0, padx=50, pady=50)
-        ctk.CTkLabel(err_frame, text="⚠️ UI Load Error", font=FONT_HEADER, text_color=COLOR_DANGER).pack(pady=(40, 10))
-        ctk.CTkLabel(err_frame, text="The app encountered malformed data while loading.", font=FONT_BOLD, text_color=COLOR_TEXT_SUB).pack()
+        ctk.CTkLabel(err_frame, text="⚠️ Connection or Load Error", font=FONT_HEADER, text_color=COLOR_DANGER).pack(pady=(40, 10))
+        ctk.CTkLabel(err_frame, text="The app could not connect or encountered bad data.", font=FONT_BOLD, text_color=COLOR_TEXT_SUB).pack()
         
-        # Scrollable text box for the raw python error
         err_box = ctk.CTkTextbox(err_frame, width=700, height=200, fg_color=COLOR_INPUT, text_color="white")
         err_box.pack(padx=40, pady=20)
         err_box.insert("1.0", str(message))
@@ -86,12 +98,13 @@ class FinancialTrackerApp(ctk.CTk):
                 with open(self.config_file, "r") as f:
                     self.db_url = json.load(f).get("db_url", "").strip()
                 if self.db_url:
-                    with psycopg2.connect(self.db_url) as conn: pass 
+                    # FIX: Added connect_timeout=10 so it doesn't freeze infinitely!
+                    with psycopg2.connect(self.db_url, connect_timeout=10) as conn: pass 
                     self.start_full_app()
                     return
             self.show_setup_screen()
         except Exception as e:
-            self.show_fatal_error(traceback.format_exc())
+            self.show_fatal_error(f"Database Error:\n{e}\n\nCheck your internet connection.")
 
     def show_setup_screen(self):
         for widget in self.winfo_children(): widget.destroy()
@@ -113,7 +126,7 @@ class FinancialTrackerApp(ctk.CTk):
         self.lbl_setup_error.configure(text="Connecting... (This may take a few seconds)", text_color=COLOR_WARNING)
         self.update() 
         try:
-            with psycopg2.connect(url) as conn:
+            with psycopg2.connect(url, connect_timeout=10) as conn:
                 with conn.cursor() as cur:
                     cur.execute("CREATE TABLE IF NOT EXISTS settings (key VARCHAR(50) PRIMARY KEY, value FLOAT)")
                     cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
@@ -158,7 +171,8 @@ class FinancialTrackerApp(ctk.CTk):
             self.show_fatal_error(traceback.format_exc())
 
     # --- DATABASE OPERATIONS ---
-    def get_db_connection(self): return psycopg2.connect(self.db_url)
+    def get_db_connection(self): 
+        return psycopg2.connect(self.db_url, connect_timeout=10)
 
     def fetch_data_from_db(self):
         data = {"settings": {"display_rate": 200.0}, "transactions": []}
@@ -276,12 +290,10 @@ class FinancialTrackerApp(ctk.CTk):
             "month_spent_usd": 0.0, "month_spent_dzd": 0.0
         }
         for t in self.data["transactions"]:
-            # SAFE DATA EXTRACTION for legacy records
             curr = t.get('currency', 'USD')
             t_type = t.get('type', 'unknown')
-            t_date = t.get('date', 'Unknown Date')
+            t_date = str(t.get('date', 'Unknown Date'))
             
-            # Extract amounts safely
             base_amt = float(t.get('amount', 0.0))
             net_amt = float(t.get('net_amount', base_amt))
 
@@ -435,9 +447,9 @@ class FinancialTrackerApp(ctk.CTk):
 
         filtered = []
         for t in self.data["transactions"]:
-            t_date = t.get('date', '')
-            t_type_val = t.get('type', '')
-            if not str(t_date).startswith(target_month): continue
+            t_date = str(t.get('date', ''))
+            t_type_val = str(t.get('type', ''))
+            if not t_date.startswith(target_month): continue
             
             is_match = False
             if f_type == "All Types": is_match = True
@@ -631,7 +643,6 @@ class FinancialTrackerApp(ctk.CTk):
         display_date = t_date[:16] if t_date != 'Unknown Date' else t_date
         disp_rate = float(self.data["settings"].get("display_rate", 200.0))
         
-        # SAFE EXTRACT AMOUNTS
         net_amt = float(t.get('net_amount', t.get('amount', 0.0)))
         base_amt = float(t.get('amount', 0.0))
 
@@ -671,7 +682,6 @@ class FinancialTrackerApp(ctk.CTk):
             else: amt_txt = f"{base_amt:,.2f} DZD"
             col = COLOR_TEXT_SUB
 
-        # CATCH-ALL FOR LEGACY DATA
         elif 'transfer' in t_type or t_type == 'transfer':
             main_txt = "Legacy Transfer"; sub_txt = display_date; amt_txt = "Processed"; col = COLOR_PRIMARY
         
