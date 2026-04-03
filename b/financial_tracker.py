@@ -492,9 +492,12 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(c2, text="DZD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 20), anchor="w")
 
+        # VISUAL FIX: Create a wrapper so the form doesn't overlap the cards above it
+        form_wrapper = ctk.CTkFrame(f, fg_color="transparent")
+        form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
+
         # Action Form
-        form = self.create_form_container(f, "Manage Savings")
-        form.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        form = self.create_form_container(form_wrapper, "Manage Savings")
 
         self.combo_sav_action = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Lock into Savings", "Withdraw to Available"]); self.combo_sav_action.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
         self.combo_sav_curr = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["USD", "DZD"]); self.combo_sav_curr.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
