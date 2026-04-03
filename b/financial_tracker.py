@@ -244,7 +244,7 @@ class FinancialTrackerApp(ctk.CTk):
         target_month = self.get_monthly_key()
         stats = {
             "usd_savings": 0.0, "paypal_balance": 0.0, "dzd_cash": 0.0, 
-            "usd_locked": 0.0, "dzd_locked": 0.0, # New Savings variables
+            "usd_locked": 0.0, "dzd_locked": 0.0, 
             "month_earned_usd": 0.0, "month_earned_dzd": 0.0, 
             "month_spent_usd": 0.0, "month_spent_dzd": 0.0
         }
@@ -263,7 +263,6 @@ class FinancialTrackerApp(ctk.CTk):
                 stats['usd_savings'] -= t['amount_usd']; stats['dzd_cash'] += t['amount_dzd']
             elif t['type'] == 'transfer_paypal_bank':
                 stats['paypal_balance'] -= t['amount_sent']; stats['usd_savings'] += t['amount_received']
-            # Savings operations
             elif t['type'] == 'savings_deposit':
                 if curr == 'USD': stats['usd_savings'] -= t['amount']; stats['usd_locked'] += t['amount']
                 else: stats['dzd_cash'] -= t['amount']; stats['dzd_locked'] += t['amount']
@@ -310,6 +309,10 @@ class FinancialTrackerApp(ctk.CTk):
             self.lbl_vault_usd.configure(text=f"${stats['usd_locked']:,.2f}")
             self.lbl_vault_dzd.configure(text=f"{stats['dzd_locked']:,.2f} DZD")
 
+        self.update_income_list()
+        self.update_expense_list()
+        self.update_transfer_list()
+        self.update_savings_list()
         self.update_dashboard_history()
 
     def change_time(self, unit, direction):
@@ -387,7 +390,6 @@ class FinancialTrackerApp(ctk.CTk):
         f_type = self.dash_filter_type.get()
         f_sort = self.dash_filter_sort.get()
 
-        # Filter
         filtered = []
         for t in self.data["transactions"]:
             if not t['date'].startswith(target_month): continue
@@ -401,7 +403,6 @@ class FinancialTrackerApp(ctk.CTk):
             
             if is_match: filtered.append(t)
 
-        # Sort
         if f_sort == "Newest First": filtered.sort(key=lambda x: x['date'], reverse=True)
         elif f_sort == "Oldest First": filtered.sort(key=lambda x: x['date'])
         elif f_sort == "Highest Amount": filtered.sort(key=lambda x: x.get('amount', x.get('amount_usd', x.get('amount_sent', 0))), reverse=True)
@@ -445,6 +446,7 @@ class FinancialTrackerApp(ctk.CTk):
         self.chk_paypal.grid(row=3, column=0, columnspan=2, pady=15, sticky="w")
         
         ctk.CTkButton(form, text="Add Income", height=50, corner_radius=25, fg_color=COLOR_SUCCESS, font=FONT_BOLD, command=self.add_income).grid(row=4, column=0, columnspan=2, pady=20, sticky="ew")
+        ctk.CTkLabel(f, text="History", font=FONT_SUBHEADER).grid(row=2, column=0, sticky="w", pady=(30, 10)); self.income_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent"); self.income_list_frame.grid(row=3, column=0, sticky="nsew")
 
     def fill_max_paypal(self):
         b = self.calculate_stats()['paypal_balance']
@@ -453,10 +455,13 @@ class FinancialTrackerApp(ctk.CTk):
 
     def create_transfer_frame(self):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["transfer"] = f
-        tv = ctk.CTkTabview(f, fg_color="transparent", segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_PRIMARY, corner_radius=20); tv.pack(fill="both", expand=True)
+        
+        tv = ctk.CTkTabview(f, fg_color="transparent", segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_PRIMARY, corner_radius=20)
+        tv.pack(fill="x", expand=False) 
+        
         t1 = tv.add("PayPal -> Bank"); t2 = tv.add("Sell USD -> DZD")
         
-        c1 = ctk.CTkFrame(t1, fg_color="transparent"); c1.pack(fill="x", padx=20, pady=20)
+        c1 = ctk.CTkFrame(t1, fg_color="transparent"); c1.pack(fill="x", padx=20, pady=10)
         
         pp_amt_row = ctk.CTkFrame(c1, fg_color="transparent"); pp_amt_row.pack(fill="x", pady=10)
         self.entry_pp_amount = self.create_input(pp_amt_row, "Amount ($)"); self.entry_pp_amount.pack(side="left", fill="x", expand=True, padx=(0, 10))
@@ -465,10 +470,14 @@ class FinancialTrackerApp(ctk.CTk):
         self.combo_pp_method = ctk.CTkComboBox(c1, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Automatic (Free)", "Manual ($5 Fee)"]); self.combo_pp_method.pack(fill="x", pady=10)
         ctk.CTkButton(c1, text="Process", height=50, corner_radius=25, fg_color=COLOR_WARNING, font=FONT_BOLD, command=self.transfer_paypal_to_bank).pack(fill="x", pady=20)
         
-        c2 = ctk.CTkFrame(t2, fg_color="transparent"); c2.pack(fill="x", padx=20, pady=20)
+        c2 = ctk.CTkFrame(t2, fg_color="transparent"); c2.pack(fill="x", padx=20, pady=10)
         self.entry_ex_usd = self.create_input(c2, "Amount ($)"); self.entry_ex_usd.pack(fill="x", pady=10)
         self.entry_ex_rate = self.create_input(c2, "Rate"); self.entry_ex_rate.pack(fill="x", pady=10)
         ctk.CTkButton(c2, text="Confirm Sale", height=50, corner_radius=25, fg_color=COLOR_PRIMARY, font=FONT_BOLD, command=self.transfer_usd_to_dzd).pack(fill="x", pady=20)
+        
+        ctk.CTkLabel(f, text="Transfer History", font=FONT_SUBHEADER).pack(anchor="w", pady=(20, 10))
+        self.transfer_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
+        self.transfer_list_frame.pack(fill="both", expand=True)
 
     def create_expenses_frame(self):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["expenses"] = f
@@ -478,32 +487,35 @@ class FinancialTrackerApp(ctk.CTk):
         self.combo_exp_cat = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Essentials", "Debt", "Luxury", "Business", "Other"]); self.combo_exp_cat.grid(row=1, column=0, padx=(0, 10), pady=10, sticky="ew")
         self.combo_exp_curr = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["DZD (Cash)", "USD (Online)"]); self.combo_exp_curr.grid(row=1, column=1, padx=(10, 0), pady=10, sticky="ew")
         ctk.CTkButton(form, text="Record", height=50, corner_radius=25, fg_color=COLOR_DANGER, font=FONT_BOLD, command=self.add_expense).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
+        ctk.CTkLabel(f, text="Recent", font=FONT_SUBHEADER).grid(row=2, column=0, sticky="w", pady=(30, 10)); self.expense_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent"); self.expense_list_frame.grid(row=3, column=0, sticky="nsew")
 
     def create_savings_frame(self):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["savings"] = f
         f.grid_columnconfigure((0, 1), weight=1)
+        f.grid_rowconfigure(3, weight=1) 
 
-        # Top Info Cards
-        c1 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c1.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 30))
+        c1 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c1.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 20))
         ctk.CTkLabel(c1, text="USD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_vault_usd = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_usd.pack(padx=20, pady=(0, 20), anchor="w")
 
-        c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 30))
+        c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 20))
         ctk.CTkLabel(c2, text="DZD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 20), anchor="w")
 
-        # VISUAL FIX: Create a wrapper so the form doesn't overlap the cards above it
         form_wrapper = ctk.CTkFrame(f, fg_color="transparent")
         form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
 
-        # Action Form
         form = self.create_form_container(form_wrapper, "Manage Savings")
-
         self.combo_sav_action = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Lock into Savings", "Withdraw to Available"]); self.combo_sav_action.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
         self.combo_sav_curr = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["USD", "DZD"]); self.combo_sav_curr.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
         
         self.entry_sav_amount = self.create_input(form, "Amount"); self.entry_sav_amount.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
         ctk.CTkButton(form, text="Confirm", height=50, corner_radius=25, fg_color=COLOR_SAVINGS, font=FONT_BOLD, command=self.manage_savings).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
+
+        ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER).grid(row=2, column=0, columnspan=2, sticky="w", pady=(20, 10))
+        self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
+        self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
+
 
     # --- ACTIONS ---
     def add_income(self):
@@ -565,7 +577,6 @@ class FinancialTrackerApp(ctk.CTk):
             t_type = 'savings_deposit' if 'Lock' in action else 'savings_withdraw'
             s = self.calculate_stats()
 
-            # Balance checks
             if t_type == 'savings_deposit':
                 if curr == 'USD' and s['usd_savings'] < amt: self.show_error_native("Insufficient Bank USD to lock."); return
                 if curr == 'DZD' and s['dzd_cash'] < amt: self.show_error_native("Insufficient Local DZD to lock."); return
@@ -583,6 +594,7 @@ class FinancialTrackerApp(ctk.CTk):
         row = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=15); row.pack(fill="x", pady=4)
         main_txt, sub_txt, amt_txt, col = "", "", "", COLOR_TEXT_MAIN
         display_date = t['date'][:16] 
+        
         if t['type'] == 'income': 
             main_txt = t['category']
             dest = 'Local Cash' if t.get('currency') == 'DZD' else ('PayPal' if t.get('to_paypal') else 'Bank')
@@ -604,6 +616,27 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(tf, text=main_txt, font=("Roboto Medium", 14)).pack(anchor="w"); ctk.CTkLabel(tf, text=sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="w")
         if not simple: ctk.CTkButton(row, text="×", width=30, height=30, corner_radius=15, fg_color=COLOR_HOVER, hover_color=COLOR_DANGER, command=lambda: self.delete_transaction(t['id'])).pack(side="right", padx=(5, 15))
         ctk.CTkLabel(row, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col).pack(side="right", padx=10)
+
+    def update_income_list(self): 
+        for w in self.income_list_frame.winfo_children(): w.destroy()
+        for t in reversed(self.data["transactions"]): 
+            if t['type'] == 'income' and t['date'].startswith(self.get_monthly_key()): self.create_list_row_modern(self.income_list_frame, t)
+    
+    def update_expense_list(self):
+        for w in self.expense_list_frame.winfo_children(): w.destroy()
+        for t in reversed(self.data["transactions"]): 
+            if t['type'] == 'expense' and t['date'].startswith(self.get_monthly_key()): self.create_list_row_modern(self.expense_list_frame, t)
+
+    def update_transfer_list(self):
+        for w in self.transfer_list_frame.winfo_children(): w.destroy()
+        for t in reversed(self.data["transactions"]): 
+            if 'transfer' in t['type']: self.create_list_row_modern(self.transfer_list_frame, t)
+
+    def update_savings_list(self):
+        if not hasattr(self, 'savings_list_frame'): return
+        for w in self.savings_list_frame.winfo_children(): w.destroy()
+        for t in reversed(self.data["transactions"]): 
+            if 'savings' in t['type']: self.create_list_row_modern(self.savings_list_frame, t)
 
 if __name__ == "__main__":
     app = FinancialTrackerApp()
