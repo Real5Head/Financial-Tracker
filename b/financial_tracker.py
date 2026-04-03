@@ -45,36 +45,67 @@ class FinancialTrackerApp(ctk.CTk):
         self.minsize(1100, 750)
         self.configure(fg_color=COLOR_BG)
 
-        # 1. DRAW A LOADING SCREEN IMMEDIATELY (Prevents the black screen)
+        # 1. DRAW LOADING SCREEN IMMEDIATELY (Prevents Black Screen)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         
         self.loading_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.loading_frame.grid(row=0, column=0)
         
-        self.lbl_loading = ctk.CTkLabel(self.loading_frame, text="Waking up Database...", font=FONT_HEADER, text_color=COLOR_TEXT_SUB)
+        self.lbl_loading = ctk.CTkLabel(self.loading_frame, text="Initializing Application...", font=FONT_HEADER, text_color=COLOR_TEXT_SUB)
         self.lbl_loading.pack(pady=10)
-        self.lbl_sub_loading = ctk.CTkLabel(self.loading_frame, text="This may take a few seconds if Neon DB is asleep.", font=FONT_MAIN, text_color="#555555")
-        self.lbl_sub_loading.pack()
 
-        # Force Tkinter to draw the UI right now before doing any background tasks
+        # Force UI to render before any background work begins
         self.update() 
 
-        # 2. Set up variables
         self.db_url = ""
         self.data = {"settings": {"display_rate": 200.0}, "transactions": []}
         self.config_file = os.path.expanduser("~/finance_tracker_db_config.json")
         self.frames = {}
         self.nav_buttons = {}
 
-        # 3. Start DB check after a tiny delay
-        self.after(200, self.check_db_connection)
+        self.after(200, self.run_startup)
 
-    # --- CRASH HANDLER ---
+    # --- STARTUP LOGIC ---
+    def run_startup(self):
+        """Single, efficient connection sequence"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r") as f:
+                    self.db_url = json.load(f).get("db_url", "").strip()
+                
+                if self.db_url:
+                    self.lbl_loading.configure(text="Waking up Database...")
+                    self.update()
+                    
+                    # Connect and Download in one single trip (10s timeout to prevent freezing)
+                    with psycopg2.connect(self.db_url, connect_timeout=10) as conn:
+                        self.lbl_loading.configure(text="Downloading your data...")
+                        self.update()
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
+                            row = cur.fetchone()
+                            if row: self.data["settings"]["display_rate"] = float(row[0])
+                            
+                            cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
+                            rows = cur.fetchall()
+                            self.data["transactions"] = [r[0] for r in rows]
+                    
+                    self.lbl_loading.configure(text="Building Interface...")
+                    self.update()
+                    self.start_full_app()
+                    return
+                    
+            self.show_setup_screen()
+        except Exception as e:
+            self.show_fatal_error(f"Startup Error:\n{e}\n\nPlease check your internet connection or DB link.")
+
     def show_fatal_error(self, message):
-        """If anything fails during drawing, show this instead of a black screen."""
+        """If anything fails entirely, show this native screen instead of crashing/blacking out."""
         for widget in self.winfo_children(): widget.destroy()
         self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0)
+        
         err_frame = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=20)
         err_frame.grid(row=0, column=0, padx=50, pady=50)
         ctk.CTkLabel(err_frame, text="⚠️ Connection or Load Error", font=FONT_HEADER, text_color=COLOR_DANGER).pack(pady=(40, 10))
@@ -90,21 +121,6 @@ class FinancialTrackerApp(ctk.CTk):
     def reset_db(self):
         if os.path.exists(self.config_file): os.remove(self.config_file)
         self.show_setup_screen()
-
-    # --- STARTUP LOGIC ---
-    def check_db_connection(self):
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, "r") as f:
-                    self.db_url = json.load(f).get("db_url", "").strip()
-                if self.db_url:
-                    # FIX: Added connect_timeout=10 so it doesn't freeze infinitely!
-                    with psycopg2.connect(self.db_url, connect_timeout=10) as conn: pass 
-                    self.start_full_app()
-                    return
-            self.show_setup_screen()
-        except Exception as e:
-            self.show_fatal_error(f"Database Error:\n{e}\n\nCheck your internet connection.")
 
     def show_setup_screen(self):
         for widget in self.winfo_children(): widget.destroy()
@@ -132,14 +148,16 @@ class FinancialTrackerApp(ctk.CTk):
                     cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
                     cur.execute("INSERT INTO settings (key, value) VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING")
                 conn.commit()
-            self.db_url = url
-            with open(self.config_file, "w") as f: json.dump({"db_url": self.db_url}, f)
-            self.start_full_app()
+            
+            # Save link and instantly launch startup sequence
+            with open(self.config_file, "w") as f: json.dump({"db_url": url}, f)
+            self.run_startup() 
         except Exception:
             self.lbl_setup_error.configure(text="Connection failed. Check your link or internet.", text_color=COLOR_DANGER)
 
     def start_full_app(self):
         try:
+            # Destroy the loading screen safely
             for widget in self.winfo_children(): widget.destroy()
             self.grid_columnconfigure(0, weight=0) 
             self.grid_columnconfigure(1, weight=1)
@@ -147,8 +165,6 @@ class FinancialTrackerApp(ctk.CTk):
             self.current_date = datetime.now()
             self.selected_month = self.current_date.month
             self.selected_year = self.current_date.year
-
-            self.data = self.fetch_data_from_db()
 
             self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
             self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
@@ -166,27 +182,28 @@ class FinancialTrackerApp(ctk.CTk):
             self.create_expenses_frame()
             self.create_savings_frame()
 
-            self.show_frame("dashboard")
+            # IMPORTANT: pass fetch_data=False so it doesn't double-connect!
+            self.show_frame("dashboard", fetch_data=False)
         except Exception as e:
-            self.show_fatal_error(traceback.format_exc())
+            self.show_fatal_error(f"UI Build Error:\n{traceback.format_exc()}")
 
     # --- DATABASE OPERATIONS ---
     def get_db_connection(self): 
         return psycopg2.connect(self.db_url, connect_timeout=10)
 
     def fetch_data_from_db(self):
-        data = {"settings": {"display_rate": 200.0}, "transactions": []}
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
                     row = cur.fetchone()
-                    if row: data["settings"]["display_rate"] = row[0]
+                    if row: self.data["settings"]["display_rate"] = float(row[0])
                     cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
                     rows = cur.fetchall()
-                    data["transactions"] = [r[0] for r in rows]
-        except Exception: self.show_error_native("Could not fetch data from database.")
-        return data
+                    self.data["transactions"] = [r[0] for r in rows]
+        except Exception as e: 
+            self.show_error_native(f"Could not sync with database. Using cached data.")
+        return self.data
 
     def add_transaction_to_db(self, t):
         self.data["transactions"].append(t) 
@@ -265,7 +282,7 @@ class FinancialTrackerApp(ctk.CTk):
         self.entry_display_rate.pack(fill="x", pady=(0, 10))
         ctk.CTkButton(settings_frame, text="Update Rate", height=35, corner_radius=17, fg_color=COLOR_HOVER, hover_color="#444", font=("Roboto", 12), command=self.update_display_rate).pack(fill="x")
 
-    def show_frame(self, name):
+    def show_frame(self, name, fetch_data=True):
         for frame in self.frames.values(): frame.grid_forget()
         self.frames[name].grid(row=0, column=0, sticky="nsew")
         for btn_name, btn in self.nav_buttons.items():
@@ -276,7 +293,8 @@ class FinancialTrackerApp(ctk.CTk):
             self.selected_month = self.current_date.month
             self.selected_year = self.current_date.year
 
-        self.data = self.fetch_data_from_db() 
+        if fetch_data:
+            self.data = self.fetch_data_from_db() 
         self.refresh_ui()
 
     def get_monthly_key(self): return f"{self.selected_year}-{self.selected_month:02d}"
