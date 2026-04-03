@@ -6,6 +6,7 @@ import uuid
 import sys
 import psycopg2
 import traceback
+import threading  # <-- THE MAGIC FIX!
 from psycopg2.extras import Json
 from datetime import datetime
 
@@ -45,7 +46,7 @@ class FinancialTrackerApp(ctk.CTk):
         self.minsize(1100, 750)
         self.configure(fg_color=COLOR_BG)
 
-        # 1. DRAW LOADING SCREEN IMMEDIATELY (Prevents Black Screen)
+        # 1. SETUP UI IMMEDIATELY
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         
@@ -55,33 +56,33 @@ class FinancialTrackerApp(ctk.CTk):
         self.lbl_loading = ctk.CTkLabel(self.loading_frame, text="Initializing Application...", font=FONT_HEADER, text_color=COLOR_TEXT_SUB)
         self.lbl_loading.pack(pady=10)
 
-        # Force UI to render before any background work begins
-        self.update() 
-
         self.db_url = ""
         self.data = {"settings": {"display_rate": 200.0}, "transactions": []}
         self.config_file = os.path.expanduser("~/finance_tracker_db_config.json")
         self.frames = {}
         self.nav_buttons = {}
 
-        self.after(200, self.run_startup)
+        # 2. GIVE MACOS 500ms TO DRAW THE WINDOW, THEN START BACKGROUND WORKER
+        self.after(500, self.start_background_sync)
 
-    # --- STARTUP LOGIC ---
-    def run_startup(self):
-        """Single, efficient connection sequence"""
+    # --- MULTITHREADED STARTUP LOGIC ---
+    def start_background_sync(self):
+        """Starts the background worker so the main UI thread never freezes."""
+        threading.Thread(target=self._bg_sync_thread, daemon=True).start()
+
+    def _bg_sync_thread(self):
+        """This runs entirely in the background!"""
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, "r") as f:
                     self.db_url = json.load(f).get("db_url", "").strip()
                 
                 if self.db_url:
-                    self.lbl_loading.configure(text="Waking up Database...")
-                    self.update()
+                    # Update UI from background thread using self.after
+                    self.after(0, lambda: self.lbl_loading.configure(text="Waking up Database..."))
                     
-                    # Connect and Download in one single trip (10s timeout to prevent freezing)
-                    with psycopg2.connect(self.db_url, connect_timeout=10) as conn:
-                        self.lbl_loading.configure(text="Downloading your data...")
-                        self.update()
+                    with psycopg2.connect(self.db_url, connect_timeout=15) as conn:
+                        self.after(0, lambda: self.lbl_loading.configure(text="Downloading your data..."))
                         with conn.cursor() as cur:
                             cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
                             row = cur.fetchone()
@@ -91,17 +92,17 @@ class FinancialTrackerApp(ctk.CTk):
                             rows = cur.fetchall()
                             self.data["transactions"] = [r[0] for r in rows]
                     
-                    self.lbl_loading.configure(text="Building Interface...")
-                    self.update()
-                    self.start_full_app()
+                    self.after(0, lambda: self.lbl_loading.configure(text="Building Interface..."))
+                    self.after(0, self.start_full_app)
                     return
                     
-            self.show_setup_screen()
+            self.after(0, self.show_setup_screen)
         except Exception as e:
-            self.show_fatal_error(f"Startup Error:\n{e}\n\nPlease check your internet connection or DB link.")
+            # If it fails, send the error to the main UI thread safely
+            self.after(0, lambda: self.show_fatal_error(f"Startup Error:\n{e}"))
 
     def show_fatal_error(self, message):
-        """If anything fails entirely, show this native screen instead of crashing/blacking out."""
+        """Renders safely on the main thread if the background thread crashes."""
         for widget in self.winfo_children(): widget.destroy()
         self.grid_columnconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=0)
@@ -139,25 +140,29 @@ class FinancialTrackerApp(ctk.CTk):
         url = self.entry_db_url.get().strip()
         if not url: self.lbl_setup_error.configure(text="Please enter a valid URL."); return
         if "sslmode=require" not in url: url += "&sslmode=require" if "?" in url else "?sslmode=require"
+        
         self.lbl_setup_error.configure(text="Connecting... (This may take a few seconds)", text_color=COLOR_WARNING)
-        self.update() 
+        
+        # Thread the connection attempt so the UI doesn't freeze here either!
+        threading.Thread(target=self._bg_connect_thread, args=(url,), daemon=True).start()
+
+    def _bg_connect_thread(self, url):
         try:
-            with psycopg2.connect(url, connect_timeout=10) as conn:
+            with psycopg2.connect(url, connect_timeout=15) as conn:
                 with conn.cursor() as cur:
                     cur.execute("CREATE TABLE IF NOT EXISTS settings (key VARCHAR(50) PRIMARY KEY, value FLOAT)")
                     cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
                     cur.execute("INSERT INTO settings (key, value) VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING")
                 conn.commit()
             
-            # Save link and instantly launch startup sequence
             with open(self.config_file, "w") as f: json.dump({"db_url": url}, f)
-            self.run_startup() 
+            self.db_url = url
+            self.after(0, self.start_full_app)
         except Exception:
-            self.lbl_setup_error.configure(text="Connection failed. Check your link or internet.", text_color=COLOR_DANGER)
+            self.after(0, lambda: self.lbl_setup_error.configure(text="Connection failed. Check your link or internet.", text_color=COLOR_DANGER))
 
     def start_full_app(self):
         try:
-            # Destroy the loading screen safely
             for widget in self.winfo_children(): widget.destroy()
             self.grid_columnconfigure(0, weight=0) 
             self.grid_columnconfigure(1, weight=1)
@@ -182,8 +187,8 @@ class FinancialTrackerApp(ctk.CTk):
             self.create_expenses_frame()
             self.create_savings_frame()
 
-            # IMPORTANT: pass fetch_data=False so it doesn't double-connect!
-            self.show_frame("dashboard", fetch_data=False)
+            # False ensures we don't re-download data on first load
+            self.show_frame("dashboard", fetch_data=False) 
         except Exception as e:
             self.show_fatal_error(f"UI Build Error:\n{traceback.format_exc()}")
 
