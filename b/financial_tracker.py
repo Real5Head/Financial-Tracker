@@ -135,7 +135,6 @@ class FinancialTrackerApp(ctk.CTk):
 
             self.show_frame("dashboard")
         except Exception as e:
-            # If the UI crashes during creation, it will show a native pop-up so we can debug it!
             messagebox.showerror("Fatal UI Error", f"App crashed while building interface:\n{e}\n\nCheck for malformed data.")
 
     # --- DATABASE OPERATIONS ---
@@ -229,7 +228,6 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(settings_frame, text="☁ Synced DB", font=("Roboto", 11, "bold"), text_color=COLOR_SUCCESS).pack(anchor="w", pady=(0, 15))
         ctk.CTkLabel(settings_frame, text="1 USD = ? DZD", font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="w", pady=(0, 5))
         
-        # Safely get rate
         current_rate = self.data.get("settings", {}).get("display_rate", 200.0)
         self.entry_display_rate = ctk.CTkEntry(settings_frame, height=35, corner_radius=17, fg_color=COLOR_INPUT, border_width=0, text_color="white", placeholder_text=str(current_rate))
         self.entry_display_rate.insert(0, str(current_rate))
@@ -265,7 +263,6 @@ class FinancialTrackerApp(ctk.CTk):
             t_type = t.get('type', 'unknown')
             t_date = str(t.get('date', 'Unknown Date'))
             
-            # BULLETPROOF DATA EXTRACTION (Prevents math errors crashing the app)
             def safe_float(key):
                 try: return float(t.get(key, 0.0))
                 except: return 0.0
@@ -306,7 +303,6 @@ class FinancialTrackerApp(ctk.CTk):
         try:
             stats = self.calculate_stats()
             
-            # Safe Display Rate Fetch
             try: disp_rate = float(self.data.get("settings", {}).get("display_rate", 200.0))
             except: disp_rate = 200.0
             
@@ -402,10 +398,11 @@ class FinancialTrackerApp(ctk.CTk):
         
         g2 = ctk.CTkFrame(c2i, fg_color="transparent"); g2.pack(side="left")
         self.lbl_month_spent_dzd = ctk.CTkLabel(g2, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_dzd.pack(anchor="w")
-        ctk.CTkLabel(g2, text=" ", font=("Roboto", 12), text_color="transparent").pack(anchor="w") 
+        
+        # FIX: Removed the buggy transparent text color. A normal space label works fine!
+        ctk.CTkLabel(g2, text=" ", font=("Roboto", 12)).pack(anchor="w") 
 
         row2 = ctk.CTkFrame(frame, fg_color="transparent"); row2.grid(row=2, column=0, sticky="ew", pady=(0, 25)); row2.grid_columnconfigure((0, 1, 2), weight=1, uniform="g2")
-        
         c3 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20); c3.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         ctk.CTkLabel(c3, text="PAYPAL (PENDING)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_paypal = ctk.CTkLabel(c3, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_WARNING); self.lbl_paypal.pack(padx=20, pady=(0, 0), anchor="w")
@@ -439,7 +436,7 @@ class FinancialTrackerApp(ctk.CTk):
         f_sort = self.dash_filter_sort.get()
 
         filtered = []
-        for t in self.data.get("transactions", []):
+        for t in self.data["transactions"]:
             t_date = str(t.get('date', ''))
             t_type_val = str(t.get('type', ''))
             if not t_date.startswith(target_month): continue
@@ -552,7 +549,9 @@ class FinancialTrackerApp(ctk.CTk):
         c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 20))
         ctk.CTkLabel(c2, text="DZD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
         self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 0), anchor="w")
-        ctk.CTkLabel(c2, text=" ", font=("Roboto", 12), text_color="transparent").pack(padx=20, pady=(0, 20), anchor="w") 
+        
+        # FIX: Removed transparent text color here as well
+        ctk.CTkLabel(c2, text=" ", font=("Roboto", 12)).pack(padx=20, pady=(0, 20), anchor="w") 
 
         form_wrapper = ctk.CTkFrame(f, fg_color="transparent"); form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
 
@@ -579,39 +578,39 @@ class FinancialTrackerApp(ctk.CTk):
             t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"income", "category":self.entry_inc_name.get(), "amount":val, "currency":curr, "fee_type":fee_type, "fee_amount":fee, "net_amount":val-fee, "to_paypal":to_paypal}
             if self.add_transaction_to_db(t):
                 self.entry_inc_name.delete(0, 'end'); self.entry_inc_amount.delete(0, 'end'); self.entry_fee_val.delete(0, 'end')
-                messagebox.showinfo("Success", "Income Added")
-        except Exception: messagebox.showerror("Error", "Invalid Input")
+                self.show_success_native("Income Added")
+        except Exception: self.show_error_native("Invalid Input")
 
     def transfer_paypal_to_bank(self):
         try:
             amt = float(self.entry_pp_amount.get()); fee = 5.0 if "Manual" in self.combo_pp_method.get() else 0
-            if self.calculate_stats()['paypal_balance'] < amt: messagebox.showerror("Error", "Insufficient Funds"); return
+            if self.calculate_stats()['paypal_balance'] < amt: self.show_error_native("Insufficient Funds"); return
             t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"transfer_paypal_bank", "amount_sent":amt, "fee_paid":fee, "amount_received":amt-fee}
             if self.add_transaction_to_db(t):
                 self.entry_pp_amount.delete(0, 'end')
-                messagebox.showinfo("Success", "Transfer Complete")
-        except Exception: messagebox.showerror("Error", "Invalid Input")
+                self.show_success_native("Transfer Complete")
+        except Exception: self.show_error_native("Invalid Input")
 
     def transfer_usd_to_dzd(self):
         try:
             usd = float(self.entry_ex_usd.get()); rate = float(self.entry_ex_rate.get())
-            if self.calculate_stats()['usd_savings'] < usd: messagebox.showerror("Error", "Insufficient USD"); return
+            if self.calculate_stats()['usd_savings'] < usd: self.show_error_native("Insufficient USD"); return
             t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"transfer_usd_dzd", "amount_usd":usd, "rate":rate, "amount_dzd":usd*rate}
             if self.add_transaction_to_db(t):
                 self.entry_ex_usd.delete(0, 'end'); self.entry_ex_rate.delete(0, 'end')
-                messagebox.showinfo("Success", "Exchange Complete")
-        except Exception: messagebox.showerror("Error", "Invalid Input")
+                self.show_success_native("Exchange Complete")
+        except Exception: self.show_error_native("Invalid Input")
 
     def add_expense(self):
         try:
             amt = float(self.entry_exp_amount.get()); curr = "USD" if "USD" in self.combo_exp_curr.get() else "DZD"
             s = self.calculate_stats()
-            if (curr=="USD" and s['usd_savings']<amt) or (curr=="DZD" and s['dzd_cash']<amt): messagebox.showerror("Error", "Insufficient Funds"); return
+            if (curr=="USD" and s['usd_savings']<amt) or (curr=="DZD" and s['dzd_cash']<amt): self.show_error_native("Insufficient Funds"); return
             t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"expense", "category":f"{self.combo_exp_cat.get()} - {self.entry_exp_desc.get()}", "amount":amt, "currency":curr}
             if self.add_transaction_to_db(t):
                 self.entry_exp_desc.delete(0, 'end'); self.entry_exp_amount.delete(0, 'end')
-                messagebox.showinfo("Success", "Expense Added")
-        except Exception: messagebox.showerror("Error", "Invalid Input")
+                self.show_success_native("Expense Added")
+        except Exception: self.show_error_native("Invalid Input")
 
     def manage_savings(self):
         try:
@@ -619,17 +618,17 @@ class FinancialTrackerApp(ctk.CTk):
             t_type = 'savings_deposit' if 'Lock' in action else 'savings_withdraw'; s = self.calculate_stats()
 
             if t_type == 'savings_deposit':
-                if curr == 'USD' and s['usd_savings'] < amt: messagebox.showerror("Error", "Insufficient Bank USD to lock."); return
-                if curr == 'DZD' and s['dzd_cash'] < amt: messagebox.showerror("Error", "Insufficient Local DZD to lock."); return
+                if curr == 'USD' and s['usd_savings'] < amt: self.show_error_native("Insufficient Bank USD to lock."); return
+                if curr == 'DZD' and s['dzd_cash'] < amt: self.show_error_native("Insufficient Local DZD to lock."); return
             else:
-                if curr == 'USD' and s['usd_locked'] < amt: messagebox.showerror("Error", "Insufficient Locked USD to withdraw."); return
-                if curr == 'DZD' and s['dzd_locked'] < amt: messagebox.showerror("Error", "Insufficient Locked DZD to withdraw."); return
+                if curr == 'USD' and s['usd_locked'] < amt: self.show_error_native("Insufficient Locked USD to withdraw."); return
+                if curr == 'DZD' and s['dzd_locked'] < amt: self.show_error_native("Insufficient Locked DZD to withdraw."); return
 
             t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": t_type, "amount":amt, "currency":curr}
             if self.add_transaction_to_db(t):
                 self.entry_sav_amount.delete(0, 'end')
-                messagebox.showinfo("Success", "Savings Vault Updated")
-        except Exception: messagebox.showerror("Error", "Invalid Input")
+                self.show_success_native("Savings Vault Updated")
+        except Exception: self.show_error_native("Invalid Input")
 
     def create_list_row_modern(self, parent, t, simple=False):
         row = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=15); row.pack(fill="x", pady=4)
