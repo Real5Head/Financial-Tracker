@@ -11,8 +11,10 @@ from psycopg2.extras import Json
 from datetime import datetime
 
 # --- MAC OS .APP FIX ---
-if sys.stdout is None: sys.stdout = open(os.devnull, 'w')
-if sys.stderr is None: sys.stderr = open(os.devnull, 'w')
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
 
 # --- Theme Configuration ---
 ctk.set_appearance_mode("Dark")
@@ -24,18 +26,19 @@ FONT_HEADER = ("Roboto Medium", 26)
 FONT_SUBHEADER = ("Roboto Medium", 18)
 FONT_NUMBERS = ("Roboto", 28, "bold")
 
-COLOR_BG = "#111111"         
-COLOR_SIDEBAR = "#161616"    
-COLOR_CARD = "#1E1E1E"       
-COLOR_INPUT = "#2B2B2B"      
-COLOR_PRIMARY = "#3B8ED0"    
-COLOR_HOVER = "#333333"      
-COLOR_SUCCESS = "#2ecc71"    
-COLOR_DANGER = "#e74c3c"     
-COLOR_WARNING = "#f39c12"    
-COLOR_SAVINGS = "#9b59b6"    
+COLOR_BG = "#111111"
+COLOR_SIDEBAR = "#161616"
+COLOR_CARD = "#1E1E1E"
+COLOR_INPUT = "#2B2B2B"
+COLOR_PRIMARY = "#3B8ED0"
+COLOR_HOVER = "#333333"
+COLOR_SUCCESS = "#2ecc71"
+COLOR_DANGER = "#e74c3c"
+COLOR_WARNING = "#f39c12"
+COLOR_SAVINGS = "#9b59b6"
 COLOR_TEXT_MAIN = "#FFFFFF"
 COLOR_TEXT_SUB = "#A0A0A0"
+
 
 class FinancialTrackerApp(ctk.CTk):
     def __init__(self):
@@ -52,63 +55,166 @@ class FinancialTrackerApp(ctk.CTk):
         self.db_url = ""
         self.data = {"settings": {"display_rate": 200.0}, "transactions": []}
         self.config_file = os.path.expanduser("~/finance_tracker_db_config.json")
-        
+
         self.frames = {}
         self.nav_buttons = {}
 
+        # --- FIX: Persistent DB connection ---
+        self._db_conn = None
+
+        # --- FIX: Cached stats to avoid redundant full replays ---
+        self._cached_stats = None
+
         self.after(100, self.check_db_connection)
 
-    # --- STARTUP LOGIC ---
+    # ================================================================
+    # DATABASE CONNECTION (persistent + auto-reconnect)
+    # ================================================================
+    def get_db_connection(self):
+        """Return a persistent connection, reconnecting if stale."""
+        try:
+            if self._db_conn is None or self._db_conn.closed:
+                self._db_conn = psycopg2.connect(self.db_url)
+                self._db_conn.autocommit = False
+            else:
+                # Lightweight check that connection is alive
+                self._db_conn.isolation_level
+        except Exception:
+            try:
+                self._db_conn = psycopg2.connect(self.db_url)
+                self._db_conn.autocommit = False
+            except Exception as e:
+                self.show_error_native(f"Database connection lost:\n{e}")
+                raise
+        return self._db_conn
+
+    def close_db_connection(self):
+        if self._db_conn and not self._db_conn.closed:
+            try:
+                self._db_conn.close()
+            except Exception:
+                pass
+        self._db_conn = None
+
+    def destroy(self):
+        """Clean up DB connection on app exit."""
+        self.close_db_connection()
+        super().destroy()
+
+    # ================================================================
+    # STARTUP
+    # ================================================================
     def check_db_connection(self):
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, "r") as f:
                     self.db_url = json.load(f).get("db_url", "").strip()
                 if self.db_url:
-                    with psycopg2.connect(self.db_url) as conn: pass 
+                    conn = psycopg2.connect(self.db_url)
+                    conn.close()
                     self.start_full_app()
                     return
             self.show_setup_screen()
         except Exception as e:
-            messagebox.showerror("Connection Error", f"Could not connect to Database.\nError: {e}")
+            messagebox.showerror(
+                "Connection Error",
+                f"Could not connect to Database.\nError: {e}"
+            )
             self.show_setup_screen()
 
     def show_setup_screen(self):
-        for widget in self.winfo_children(): widget.destroy()
-        self.grid_columnconfigure(0, weight=1) 
+        for widget in self.winfo_children():
+            widget.destroy()
+        self.grid_columnconfigure(0, weight=1)
+
         setup_container = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=20)
         setup_container.grid(row=0, column=0, padx=50, pady=50)
-        ctk.CTkLabel(setup_container, text="Database Setup", font=FONT_HEADER, text_color=COLOR_TEXT_MAIN).pack(pady=(40, 10))
-        ctk.CTkLabel(setup_container, text="Connect your Neon PostgreSQL Database to sync across devices.", font=FONT_MAIN, text_color=COLOR_TEXT_SUB).pack(padx=40, pady=(0, 30))
-        self.entry_db_url = ctk.CTkEntry(setup_container, width=500, height=50, corner_radius=25, border_width=0, fg_color=COLOR_INPUT, text_color="white", placeholder_text="postgresql://user:pass@ep-...neon.tech/neondb")
+
+        ctk.CTkLabel(
+            setup_container, text="Database Setup",
+            font=FONT_HEADER, text_color=COLOR_TEXT_MAIN
+        ).pack(pady=(40, 10))
+        ctk.CTkLabel(
+            setup_container,
+            text="Connect your Neon PostgreSQL Database to sync across devices.",
+            font=FONT_MAIN, text_color=COLOR_TEXT_SUB
+        ).pack(padx=40, pady=(0, 30))
+
+        self.entry_db_url = ctk.CTkEntry(
+            setup_container, width=500, height=50, corner_radius=25,
+            border_width=0, fg_color=COLOR_INPUT, text_color="white",
+            placeholder_text="postgresql://user:pass@ep-...neon.tech/neondb"
+        )
         self.entry_db_url.pack(padx=40, pady=10)
-        self.lbl_setup_error = ctk.CTkLabel(setup_container, text="", font=FONT_BOLD, text_color=COLOR_DANGER)
+
+        self.lbl_setup_error = ctk.CTkLabel(
+            setup_container, text="", font=FONT_BOLD, text_color=COLOR_DANGER
+        )
         self.lbl_setup_error.pack(pady=5)
-        ctk.CTkButton(setup_container, text="Connect & Sync", width=200, height=50, corner_radius=25, font=FONT_BOLD, fg_color=COLOR_PRIMARY, command=self.attempt_connection).pack(pady=(10, 40))
+
+        ctk.CTkButton(
+            setup_container, text="Connect & Sync", width=200, height=50,
+            corner_radius=25, font=FONT_BOLD, fg_color=COLOR_PRIMARY,
+            command=self.attempt_connection
+        ).pack(pady=(10, 40))
 
     def attempt_connection(self):
         url = self.entry_db_url.get().strip()
-        if not url: self.lbl_setup_error.configure(text="Please enter a valid URL."); return
-        if "sslmode=require" not in url: url += "&sslmode=require" if "?" in url else "?sslmode=require"
-        self.lbl_setup_error.configure(text="Connecting... (This may take a few seconds)", text_color=COLOR_WARNING)
-        self.update() 
+        if not url:
+            self.lbl_setup_error.configure(text="Please enter a valid URL.")
+            return
+
+        if "sslmode=require" not in url:
+            url += "&sslmode=require" if "?" in url else "?sslmode=require"
+
+        self.lbl_setup_error.configure(
+            text="Connecting... (This may take a few seconds)",
+            text_color=COLOR_WARNING
+        )
+        self.update()
+
         try:
-            with psycopg2.connect(url) as conn:
+            conn = psycopg2.connect(url)
+            with conn:
                 with conn.cursor() as cur:
-                    cur.execute("CREATE TABLE IF NOT EXISTS settings (key VARCHAR(50) PRIMARY KEY, value FLOAT)")
-                    cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
-                    cur.execute("INSERT INTO settings (key, value) VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING")
-                conn.commit()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS settings (
+                            key VARCHAR(50) PRIMARY KEY,
+                            value FLOAT
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS transactions (
+                            id VARCHAR(255) PRIMARY KEY,
+                            t_date VARCHAR(50),
+                            t_type VARCHAR(50),
+                            payload JSONB
+                        )
+                    """)
+                    cur.execute(
+                        "INSERT INTO settings (key, value) "
+                        "VALUES ('display_rate', 200.0) ON CONFLICT DO NOTHING"
+                    )
+            conn.close()
+
             self.db_url = url
-            with open(self.config_file, "w") as f: json.dump({"db_url": self.db_url}, f)
+            with open(self.config_file, "w") as f:
+                json.dump({"db_url": self.db_url}, f)
             self.start_full_app()
-        except Exception:
-            self.lbl_setup_error.configure(text="Connection failed. Check your link or internet.", text_color=COLOR_DANGER)
+        except psycopg2.OperationalError as e:
+            self.lbl_setup_error.configure(
+                text=f"Connection failed: {e}", text_color=COLOR_DANGER
+            )
+        except Exception as e:
+            self.lbl_setup_error.configure(
+                text=f"Unexpected error: {e}", text_color=COLOR_DANGER
+            )
 
     def start_full_app(self):
         try:
-            for widget in self.winfo_children(): widget.destroy()
-            self.grid_columnconfigure(0, weight=0) 
+            for widget in self.winfo_children():
+                widget.destroy()
+            self.grid_columnconfigure(0, weight=0)
             self.grid_columnconfigure(1, weight=1)
 
             self.current_date = datetime.now()
@@ -117,12 +223,16 @@ class FinancialTrackerApp(ctk.CTk):
 
             self.data = self.fetch_data_from_db()
 
-            self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
+            self.sidebar_frame = ctk.CTkFrame(
+                self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR
+            )
             self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-            self.sidebar_frame.grid_rowconfigure(7, weight=1) 
+            self.sidebar_frame.grid_rowconfigure(7, weight=1)
             self.create_sidebar()
 
-            self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+            self.main_frame = ctk.CTkFrame(
+                self, corner_radius=0, fg_color="transparent"
+            )
             self.main_frame.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
             self.main_frame.grid_columnconfigure(0, weight=1)
             self.main_frame.grid_rowconfigure(0, weight=1)
@@ -135,36 +245,57 @@ class FinancialTrackerApp(ctk.CTk):
 
             self.show_frame("dashboard")
         except Exception as e:
-            messagebox.showerror("Fatal UI Error", f"App crashed while building interface:\n{e}\n\nCheck for malformed data.")
+            messagebox.showerror(
+                "Fatal UI Error",
+                f"App crashed while building interface:\n{e}\n\n{traceback.format_exc()}"
+            )
 
-    # --- DATABASE OPERATIONS ---
-    def get_db_connection(self): 
-        return psycopg2.connect(self.db_url)
-
+    # ================================================================
+    # DATABASE OPERATIONS
+    # ================================================================
     def fetch_data_from_db(self):
         data = {"settings": {"display_rate": 200.0}, "transactions": []}
         try:
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
-                    row = cur.fetchone()
-                    if row: data["settings"]["display_rate"] = row[0]
-                    cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
-                    rows = cur.fetchall()
-                    data["transactions"] = [r[0] for r in rows]
-        except Exception: self.show_error_native("Could not fetch data from database.")
+            conn = self.get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM settings WHERE key = 'display_rate'")
+                row = cur.fetchone()
+                if row:
+                    data["settings"]["display_rate"] = row[0]
+                cur.execute("SELECT payload FROM transactions ORDER BY t_date ASC")
+                rows = cur.fetchall()
+                data["transactions"] = [r[0] for r in rows]
+            conn.commit()
+        except Exception as e:
+            self.show_error_native(f"Could not fetch data from database:\n{e}")
+        self._cached_stats = None  # invalidate cache on fresh fetch
         return data
 
     def add_transaction_to_db(self, t):
-        self.data["transactions"].append(t) 
+        """Insert a transaction into the DB and refresh UI. Returns True on success."""
         try:
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("INSERT INTO transactions (id, t_date, t_type, payload) VALUES (%s, %s, %s, %s)", (t['id'], t['date'], t['type'], Json(t)))
+            conn = self.get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO transactions (id, t_date, t_type, payload) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (t['id'], t['date'], t['type'], Json(t))
+                )
+            conn.commit()
+            self.data["transactions"].append(t)
+            self._cached_stats = None
             self.refresh_ui()
             return True
-        except Exception:
-            self.show_error_native("Failed to save transaction to database.")
+        except psycopg2.IntegrityError:
+            self.get_db_connection().rollback()
+            self.show_error_native("Duplicate transaction ID — try again.")
+            return False
+        except Exception as e:
+            try:
+                self.get_db_connection().rollback()
+            except Exception:
+                pass
+            self.show_error_native(f"Failed to save transaction:\n{e}")
             return False
 
     def delete_transaction(self, tid):
@@ -173,174 +304,331 @@ class FinancialTrackerApp(ctk.CTk):
         dialog.geometry("300x150")
         dialog.attributes('-topmost', True)
         ctk.CTkLabel(dialog, text="Delete this transaction?", font=FONT_BOLD).pack(pady=20)
-        
+
         def confirm():
             dialog.destroy()
-            self.data["transactions"] = [t for t in self.data["transactions"] if t.get("id", "") != tid]
             try:
-                with self.get_db_connection() as conn:
-                    with conn.cursor() as cur: cur.execute("DELETE FROM transactions WHERE id = %s", (tid,))
+                conn = self.get_db_connection()
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM transactions WHERE id = %s", (tid,))
+                conn.commit()
+                self.data["transactions"] = [
+                    t for t in self.data["transactions"] if t.get("id", "") != tid
+                ]
+                self._cached_stats = None
                 self.refresh_ui()
-            except Exception: self.show_error_native("Failed to delete from database.")
-        
+            except Exception as e:
+                try:
+                    self.get_db_connection().rollback()
+                except Exception:
+                    pass
+                self.show_error_native(f"Failed to delete from database:\n{e}")
+
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=10)
-        ctk.CTkButton(btn_frame, text="Cancel", width=100, fg_color=COLOR_INPUT, hover_color=COLOR_HOVER, command=dialog.destroy).pack(side="left", padx=10)
-        ctk.CTkButton(btn_frame, text="Delete", width=100, fg_color=COLOR_DANGER, command=confirm).pack(side="right", padx=10)
+        ctk.CTkButton(
+            btn_frame, text="Cancel", width=100,
+            fg_color=COLOR_INPUT, hover_color=COLOR_HOVER,
+            command=dialog.destroy
+        ).pack(side="left", padx=10)
+        ctk.CTkButton(
+            btn_frame, text="Delete", width=100,
+            fg_color=COLOR_DANGER, command=confirm
+        ).pack(side="right", padx=10)
 
     def update_display_rate(self):
         try:
             new_rate = float(self.entry_display_rate.get())
+            if new_rate <= 0:
+                self.show_error_native("Rate must be a positive number.")
+                return
+        except ValueError:
+            self.show_error_native("Invalid number entered for rate.")
+            return
+
+        try:
+            conn = self.get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE settings SET value = %s WHERE key = 'display_rate'",
+                    (new_rate,)
+                )
+            conn.commit()
             self.data["settings"]["display_rate"] = new_rate
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cur: cur.execute("UPDATE settings SET value = %s WHERE key = 'display_rate'", (new_rate,))
+            self._cached_stats = None
             self.refresh_ui()
-            self.show_success_native("Rate Updated successfully.")
-        except ValueError: self.show_error_native("Invalid Number entered.")
-        except Exception: self.show_error_native("Failed to update database.")
+            self.show_success_native("Rate updated successfully.")
+        except Exception as e:
+            try:
+                self.get_db_connection().rollback()
+            except Exception:
+                pass
+            self.show_error_native(f"Failed to update database:\n{e}")
 
     def show_error_native(self, msg):
         err = ctk.CTkToplevel(self)
-        err.title("Error"); err.geometry("400x150"); err.attributes('-topmost', True)
-        ctk.CTkLabel(err, text=msg, font=FONT_BOLD, text_color=COLOR_DANGER, wraplength=350).pack(pady=30)
-        ctk.CTkButton(err, text="OK", width=100, fg_color=COLOR_INPUT, command=err.destroy).pack()
+        err.title("Error")
+        err.geometry("450x180")
+        err.attributes('-topmost', True)
+        ctk.CTkLabel(
+            err, text=msg, font=FONT_BOLD,
+            text_color=COLOR_DANGER, wraplength=400
+        ).pack(pady=30)
+        ctk.CTkButton(
+            err, text="OK", width=100,
+            fg_color=COLOR_INPUT, command=err.destroy
+        ).pack()
 
     def show_success_native(self, msg):
         succ = ctk.CTkToplevel(self)
-        succ.title("Success"); succ.geometry("300x150"); succ.attributes('-topmost', True)
+        succ.title("Success")
+        succ.geometry("300x150")
+        succ.attributes('-topmost', True)
         ctk.CTkLabel(succ, text=msg, font=FONT_BOLD, text_color=COLOR_SUCCESS).pack(pady=30)
-        ctk.CTkButton(succ, text="OK", width=100, fg_color=COLOR_PRIMARY, command=succ.destroy).pack()
+        ctk.CTkButton(
+            succ, text="OK", width=100,
+            fg_color=COLOR_PRIMARY, command=succ.destroy
+        ).pack()
 
-    # --- UI LAYOUTS ---
+    # ================================================================
+    # UI LAYOUTS
+    # ================================================================
     def create_sidebar(self):
-        logo_label = ctk.CTkLabel(self.sidebar_frame, text="FINANCE\nTRACKER", font=("Roboto", 22, "bold"), text_color=COLOR_TEXT_MAIN)
+        logo_label = ctk.CTkLabel(
+            self.sidebar_frame, text="FINANCE\nTRACKER",
+            font=("Roboto", 22, "bold"), text_color=COLOR_TEXT_MAIN
+        )
         logo_label.grid(row=0, column=0, padx=20, pady=(50, 40), sticky="w")
-        buttons = [("Dashboard", "dashboard"), ("Add Income", "income"), ("Transfers", "transfer"), ("Expenses", "expenses"), ("Savings & Vault", "savings")]
+
+        buttons = [
+            ("Dashboard", "dashboard"),
+            ("Add Income", "income"),
+            ("Transfers", "transfer"),
+            ("Expenses", "expenses"),
+            ("Savings & Vault", "savings"),
+        ]
 
         for i, (text, name) in enumerate(buttons):
-            btn = ctk.CTkButton(self.sidebar_frame, text=text, height=45, corner_radius=22, font=FONT_BOLD, fg_color="transparent", text_color=COLOR_TEXT_SUB, hover_color=COLOR_HOVER, anchor="w", border_spacing=20, command=lambda n=name: self.show_frame(n))
-            btn.grid(row=i+1, column=0, sticky="ew", padx=15, pady=5)
+            btn = ctk.CTkButton(
+                self.sidebar_frame, text=text, height=45, corner_radius=22,
+                font=FONT_BOLD, fg_color="transparent", text_color=COLOR_TEXT_SUB,
+                hover_color=COLOR_HOVER, anchor="w", border_spacing=20,
+                command=lambda n=name: self.show_frame(n)
+            )
+            btn.grid(row=i + 1, column=0, sticky="ew", padx=15, pady=5)
             self.nav_buttons[name] = btn
 
         settings_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
         settings_frame.grid(row=8, column=0, padx=20, pady=30, sticky="ew")
-        
-        ctk.CTkLabel(settings_frame, text="☁ Synced DB", font=("Roboto", 11, "bold"), text_color=COLOR_SUCCESS).pack(anchor="w", pady=(0, 15))
-        ctk.CTkLabel(settings_frame, text="1 USD = ? DZD", font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="w", pady=(0, 5))
-        
+
+        ctk.CTkLabel(
+            settings_frame, text="☁ Synced DB",
+            font=("Roboto", 11, "bold"), text_color=COLOR_SUCCESS
+        ).pack(anchor="w", pady=(0, 15))
+        ctk.CTkLabel(
+            settings_frame, text="1 USD = ? DZD",
+            font=("Roboto", 11), text_color=COLOR_TEXT_SUB
+        ).pack(anchor="w", pady=(0, 5))
+
         current_rate = self.data.get("settings", {}).get("display_rate", 200.0)
-        self.entry_display_rate = ctk.CTkEntry(settings_frame, height=35, corner_radius=17, fg_color=COLOR_INPUT, border_width=0, text_color="white", placeholder_text=str(current_rate))
+        self.entry_display_rate = ctk.CTkEntry(
+            settings_frame, height=35, corner_radius=17,
+            fg_color=COLOR_INPUT, border_width=0,
+            text_color="white", placeholder_text=str(current_rate)
+        )
         self.entry_display_rate.insert(0, str(current_rate))
         self.entry_display_rate.pack(fill="x", pady=(0, 10))
-        ctk.CTkButton(settings_frame, text="Update Rate", height=35, corner_radius=17, fg_color=COLOR_HOVER, hover_color="#444", font=("Roboto", 12), command=self.update_display_rate).pack(fill="x")
+        ctk.CTkButton(
+            settings_frame, text="Update Rate", height=35,
+            corner_radius=17, fg_color=COLOR_HOVER, hover_color="#444",
+            font=("Roboto", 12), command=self.update_display_rate
+        ).pack(fill="x")
 
     def show_frame(self, name):
-        for frame in self.frames.values(): frame.grid_forget()
+        for frame in self.frames.values():
+            frame.grid_forget()
         self.frames[name].grid(row=0, column=0, sticky="nsew")
+
         for btn_name, btn in self.nav_buttons.items():
-            btn.configure(fg_color=COLOR_HOVER if btn_name == name else "transparent", text_color="white" if btn_name == name else COLOR_TEXT_SUB)
-        
+            btn.configure(
+                fg_color=COLOR_HOVER if btn_name == name else "transparent",
+                text_color="white" if btn_name == name else COLOR_TEXT_SUB
+            )
+
         if name == "dashboard":
             self.current_date = datetime.now()
             self.selected_month = self.current_date.month
             self.selected_year = self.current_date.year
 
-        self.data = self.fetch_data_from_db() 
+        self.data = self.fetch_data_from_db()
         self.refresh_ui()
 
-    def get_monthly_key(self): return f"{self.selected_year}-{self.selected_month:02d}"
+    def get_monthly_key(self):
+        return f"{self.selected_year}-{self.selected_month:02d}"
 
+    # ================================================================
+    # STATS CALCULATION (with caching)
+    # ================================================================
     def calculate_stats(self):
+        """Replay all transactions to derive current balances + monthly stats."""
+        if self._cached_stats is not None:
+            # Check if the cached month still matches
+            cached_key = self._cached_stats.get("_month_key")
+            if cached_key == self.get_monthly_key():
+                return self._cached_stats
+
         target_month = self.get_monthly_key()
         stats = {
-            "usd_savings": 0.0, "paypal_balance": 0.0, "dzd_cash": 0.0, 
-            "usd_locked": 0.0, "dzd_locked": 0.0, 
-            "month_earned_usd": 0.0, "month_earned_dzd": 0.0, 
-            "month_spent_usd": 0.0, "month_spent_dzd": 0.0
+            "usd_savings": 0.0, "paypal_balance": 0.0, "dzd_cash": 0.0,
+            "usd_locked": 0.0, "dzd_locked": 0.0,
+            "month_earned_usd": 0.0, "month_earned_dzd": 0.0,
+            "month_spent_usd": 0.0, "month_spent_dzd": 0.0,
         }
+
         for t in self.data.get("transactions", []):
             curr = t.get('currency', 'USD')
             t_type = t.get('type', 'unknown')
-            t_date = str(t.get('date', 'Unknown Date'))
-            
+            t_date = str(t.get('date', ''))
+
             def safe_float(key):
-                try: return float(t.get(key, 0.0))
-                except: return 0.0
+                try:
+                    return float(t.get(key, 0.0))
+                except (ValueError, TypeError):
+                    return 0.0
 
             base_amt = safe_float('amount')
             net_amt = safe_float('net_amount')
-            if net_amt == 0.0: net_amt = base_amt
+            if net_amt == 0.0:
+                net_amt = base_amt
 
             if t_type == 'income':
-                if t.get('to_paypal', False) and curr == 'USD': stats['paypal_balance'] += net_amt
-                else: 
-                    if curr == 'USD': stats['usd_savings'] += net_amt
-                    else: stats['dzd_cash'] += net_amt
-            elif t_type == 'expense':
-                if curr == 'USD': stats['usd_savings'] -= base_amt
-                else: stats['dzd_cash'] -= base_amt
-            elif t_type == 'transfer_usd_dzd':
-                stats['usd_savings'] -= safe_float('amount_usd'); stats['dzd_cash'] += safe_float('amount_dzd')
-            elif t_type == 'transfer_paypal_bank':
-                stats['paypal_balance'] -= safe_float('amount_sent'); stats['usd_savings'] += safe_float('amount_received')
-            elif t_type == 'savings_deposit':
-                if curr == 'USD': stats['usd_savings'] -= base_amt; stats['usd_locked'] += base_amt
-                else: stats['dzd_cash'] -= base_amt; stats['dzd_locked'] += base_amt
-            elif t_type == 'savings_withdraw':
-                if curr == 'USD': stats['usd_savings'] += base_amt; stats['usd_locked'] -= base_amt
-                else: stats['dzd_cash'] += base_amt; stats['dzd_locked'] -= base_amt
+                if t.get('to_paypal', False) and curr == 'USD':
+                    stats['paypal_balance'] += net_amt
+                else:
+                    if curr == 'USD':
+                        stats['usd_savings'] += net_amt
+                    else:
+                        stats['dzd_cash'] += net_amt
 
+            elif t_type == 'expense':
+                if curr == 'USD':
+                    stats['usd_savings'] -= base_amt
+                else:
+                    stats['dzd_cash'] -= base_amt
+
+            elif t_type == 'transfer_usd_dzd':
+                stats['usd_savings'] -= safe_float('amount_usd')
+                stats['dzd_cash'] += safe_float('amount_dzd')
+
+            elif t_type == 'transfer_paypal_bank':
+                stats['paypal_balance'] -= safe_float('amount_sent')
+                stats['usd_savings'] += safe_float('amount_received')
+
+            elif t_type == 'savings_deposit':
+                if curr == 'USD':
+                    stats['usd_savings'] -= base_amt
+                    stats['usd_locked'] += base_amt
+                else:
+                    stats['dzd_cash'] -= base_amt
+                    stats['dzd_locked'] += base_amt
+
+            elif t_type == 'savings_withdraw':
+                if curr == 'USD':
+                    stats['usd_savings'] += base_amt
+                    stats['usd_locked'] -= base_amt
+                else:
+                    stats['dzd_cash'] += base_amt
+                    stats['dzd_locked'] -= base_amt
+
+            # Monthly aggregation
             if t_date.startswith(target_month):
-                if t_type == 'income': 
-                    if curr == 'USD': stats['month_earned_usd'] += net_amt
-                    else: stats['month_earned_dzd'] += net_amt
+                if t_type == 'income':
+                    if curr == 'USD':
+                        stats['month_earned_usd'] += net_amt
+                    else:
+                        stats['month_earned_dzd'] += net_amt
                 elif t_type == 'expense':
-                    if curr == 'USD': stats['month_spent_usd'] += base_amt
-                    else: stats['month_spent_dzd'] += base_amt
+                    if curr == 'USD':
+                        stats['month_spent_usd'] += base_amt
+                    else:
+                        stats['month_spent_dzd'] += base_amt
+
+        stats["_month_key"] = target_month
+        self._cached_stats = stats
         return stats
 
+    # ================================================================
+    # UI REFRESH
+    # ================================================================
     def refresh_ui(self):
         try:
             stats = self.calculate_stats()
-            
-            try: disp_rate = float(self.data.get("settings", {}).get("display_rate", 200.0))
-            except: disp_rate = 200.0
-            
+
+            try:
+                disp_rate = float(self.data.get("settings", {}).get("display_rate", 200.0))
+            except (ValueError, TypeError):
+                disp_rate = 200.0
+            if disp_rate <= 0:
+                disp_rate = 200.0
+
             # PayPal
             self.lbl_paypal.configure(text=f"${stats['paypal_balance']:,.2f}")
-            self.lbl_paypal_sub.configure(text=f"≈ {stats['paypal_balance'] * disp_rate:,.0f} DZD")
-            
+            self.lbl_paypal_sub.configure(
+                text=f"≈ {stats['paypal_balance'] * disp_rate:,.0f} DZD"
+            )
+
             # Bank
             self.lbl_usd_savings.configure(text=f"${stats['usd_savings']:,.2f}")
-            self.lbl_usd_savings_sub.configure(text=f"≈ {stats['usd_savings'] * disp_rate:,.0f} DZD")
-            
+            self.lbl_usd_savings_sub.configure(
+                text=f"≈ {stats['usd_savings'] * disp_rate:,.0f} DZD"
+            )
+
             # Local Cash
             self.lbl_dzd_cash.configure(text=f"{stats['dzd_cash']:,.2f} DZD")
-            
+
             # Monthly Earned
-            earn_txt = f"+ ${stats['month_earned_usd']:,.2f}" if stats['month_earned_dzd'] == 0 else f"+ ${stats['month_earned_usd']:,.2f}  |  + {stats['month_earned_dzd']:,.0f} DZD"
+            parts = []
+            if stats['month_earned_usd'] > 0:
+                parts.append(f"+ ${stats['month_earned_usd']:,.2f}")
+            if stats['month_earned_dzd'] > 0:
+                parts.append(f"+ {stats['month_earned_dzd']:,.0f} DZD")
+            earn_txt = "  |  ".join(parts) if parts else "$0.00"
             self.lbl_month_earned.configure(text=earn_txt)
-            
+
             # Monthly Spent
-            self.lbl_month_spent_usd.configure(text=f"${stats['month_spent_usd']:,.2f}")
-            self.lbl_month_spent_usd_sub.configure(text=f"≈ {stats['month_spent_usd'] * disp_rate:,.0f} DZD")
-            self.lbl_month_spent_dzd.configure(text=f"{stats['month_spent_dzd']:,.2f} DZD")
-            
+            self.lbl_month_spent_usd.configure(
+                text=f"${stats['month_spent_usd']:,.2f}"
+            )
+            self.lbl_month_spent_usd_sub.configure(
+                text=f"≈ {stats['month_spent_usd'] * disp_rate:,.0f} DZD"
+            )
+            self.lbl_month_spent_dzd.configure(
+                text=f"{stats['month_spent_dzd']:,.2f} DZD"
+            )
+
             # Net Worth
             total_usd = stats['usd_savings'] + stats['paypal_balance'] + stats['usd_locked']
             total_dzd = stats['dzd_cash'] + stats['dzd_locked']
-            nw_usd = total_usd + (total_dzd / disp_rate if disp_rate > 0 else 0)
+            nw_usd = total_usd + (total_dzd / disp_rate)
             nw_dzd = total_dzd + (total_usd * disp_rate)
-            
-            self.lbl_header_nw.configure(text=f"${nw_usd:,.2f}  |  ≈ {nw_dzd:,.0f} DZD")
-            self.lbl_month_selector.configure(text=f"{datetime(self.selected_year, self.selected_month, 1).strftime('%B')}")
+
+            self.lbl_header_nw.configure(
+                text=f"${nw_usd:,.2f}  |  ≈ {nw_dzd:,.0f} DZD"
+            )
+            self.lbl_month_selector.configure(
+                text=f"{datetime(self.selected_year, self.selected_month, 1).strftime('%B')}"
+            )
             self.lbl_year_selector.configure(text=f"{self.selected_year}")
 
-            # Savings
+            # Savings vault cards
             if "savings" in self.frames:
                 self.lbl_vault_usd.configure(text=f"${stats['usd_locked']:,.2f}")
-                self.lbl_vault_usd_sub.configure(text=f"≈ {stats['usd_locked'] * disp_rate:,.0f} DZD")
-                self.lbl_vault_dzd.configure(text=f"{stats['dzd_locked']:,.2f} DZD")
+                self.lbl_vault_usd_sub.configure(
+                    text=f"≈ {stats['usd_locked'] * disp_rate:,.0f} DZD"
+                )
+                self.lbl_vault_dzd.configure(
+                    text=f"{stats['dzd_locked']:,.2f} DZD"
+                )
 
             self.update_income_list()
             self.update_expense_list()
@@ -348,89 +636,215 @@ class FinancialTrackerApp(ctk.CTk):
             self.update_savings_list()
             self.update_dashboard_history()
         except Exception as e:
-            messagebox.showerror("Refresh Error", f"App failed to draw data properly:\n{e}")
+            messagebox.showerror(
+                "Refresh Error",
+                f"App failed to draw data properly:\n{e}\n\n{traceback.format_exc()}"
+            )
 
     def change_time(self, unit, direction):
         if unit == 'month':
             if direction == 1:
-                if self.selected_month == 12: self.selected_month = 1; self.selected_year += 1
-                else: self.selected_month += 1
+                if self.selected_month == 12:
+                    self.selected_month = 1
+                    self.selected_year += 1
+                else:
+                    self.selected_month += 1
             else:
-                if self.selected_month == 1: self.selected_month = 12; self.selected_year -= 1
-                else: self.selected_month -= 1
+                if self.selected_month == 1:
+                    self.selected_month = 12
+                    self.selected_year -= 1
+                else:
+                    self.selected_month -= 1
         elif unit == 'year':
             self.selected_year += direction
+        self._cached_stats = None  # month changed, invalidate
         self.refresh_ui()
 
+    # ================================================================
+    # DASHBOARD
+    # ================================================================
     def create_dashboard_frame(self):
-        frame = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["dashboard"] = frame
-        frame.grid_columnconfigure(0, weight=1); frame.grid_rowconfigure(4, weight=1) 
-        header = ctk.CTkFrame(frame, fg_color="transparent"); header.grid(row=0, column=0, sticky="ew", pady=(0, 25))
-        
-        nav = ctk.CTkFrame(header, fg_color=COLOR_CARD, corner_radius=50, height=40); nav.pack(side="left")
-        ctk.CTkButton(nav, text="<", width=30, height=40, corner_radius=20, fg_color="transparent", hover_color=COLOR_HOVER, command=lambda: self.change_time('month', -1)).pack(side="left")
-        self.lbl_month_selector = ctk.CTkLabel(nav, text="Month", font=("Roboto Medium", 14), width=80); self.lbl_month_selector.pack(side="left", padx=5)
-        ctk.CTkButton(nav, text=">", width=30, height=40, corner_radius=20, fg_color="transparent", hover_color=COLOR_HOVER, command=lambda: self.change_time('month', 1)).pack(side="left")
-        
-        nav_yr = ctk.CTkFrame(header, fg_color=COLOR_CARD, corner_radius=50, height=40); nav_yr.pack(side="left", padx=10)
-        ctk.CTkButton(nav_yr, text="<", width=30, height=40, corner_radius=20, fg_color="transparent", hover_color=COLOR_HOVER, command=lambda: self.change_time('year', -1)).pack(side="left")
-        self.lbl_year_selector = ctk.CTkLabel(nav_yr, text="Year", font=("Roboto Medium", 14), width=60); self.lbl_year_selector.pack(side="left", padx=5)
-        ctk.CTkButton(nav_yr, text=">", width=30, height=40, corner_radius=20, fg_color="transparent", hover_color=COLOR_HOVER, command=lambda: self.change_time('year', 1)).pack(side="left")
+        frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.frames["dashboard"] = frame
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(4, weight=1)
 
-        nw = ctk.CTkFrame(header, fg_color="transparent"); nw.pack(side="right")
-        ctk.CTkLabel(nw, text="TOTAL NET WORTH (All Assets + Savings)", font=("Roboto", 11, "bold"), text_color=COLOR_TEXT_SUB).pack(anchor="e")
-        self.lbl_header_nw = ctk.CTkLabel(nw, text="$0.00 | 0 DZD", font=("Roboto", 26, "bold"), text_color="white"); self.lbl_header_nw.pack(anchor="e")
+        # --- Header with month/year nav and net worth ---
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 25))
 
-        row1 = ctk.CTkFrame(frame, fg_color="transparent"); row1.grid(row=1, column=0, sticky="ew", pady=(0, 15)); row1.grid_columnconfigure((0, 1), weight=1, uniform="g1")
-        c1 = ctk.CTkFrame(row1, fg_color=COLOR_CARD, corner_radius=20); c1.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        ctk.CTkLabel(c1, text="INCOME THIS MONTH", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_month_earned = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SUCCESS); self.lbl_month_earned.pack(padx=20, pady=(0, 20), anchor="w")
-        
-        c2 = ctk.CTkFrame(row1, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0))
-        ctk.CTkLabel(c2, text="EXPENSES THIS MONTH", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        c2i = ctk.CTkFrame(c2, fg_color="transparent"); c2i.pack(padx=20, pady=(0, 20), anchor="w")
-        
-        g1 = ctk.CTkFrame(c2i, fg_color="transparent"); g1.pack(side="left")
-        self.lbl_month_spent_usd = ctk.CTkLabel(g1, text="$0.00", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_usd.pack(anchor="w")
-        self.lbl_month_spent_usd_sub = ctk.CTkLabel(g1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_month_spent_usd_sub.pack(anchor="w")
-        
-        ctk.CTkLabel(c2i, text="  |  ", font=("Roboto", 20), text_color=COLOR_TEXT_SUB).pack(side="left", padx=15)
-        
-        g2 = ctk.CTkFrame(c2i, fg_color="transparent"); g2.pack(side="left")
-        self.lbl_month_spent_dzd = ctk.CTkLabel(g2, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER); self.lbl_month_spent_dzd.pack(anchor="w")
-        
-        # FIX: Removed the buggy transparent text color. A normal space label works fine!
-        ctk.CTkLabel(g2, text=" ", font=("Roboto", 12)).pack(anchor="w") 
+        nav = ctk.CTkFrame(header, fg_color=COLOR_CARD, corner_radius=50, height=40)
+        nav.pack(side="left")
+        ctk.CTkButton(
+            nav, text="<", width=30, height=40, corner_radius=20,
+            fg_color="transparent", hover_color=COLOR_HOVER,
+            command=lambda: self.change_time('month', -1)
+        ).pack(side="left")
+        self.lbl_month_selector = ctk.CTkLabel(
+            nav, text="Month", font=("Roboto Medium", 14), width=80
+        )
+        self.lbl_month_selector.pack(side="left", padx=5)
+        ctk.CTkButton(
+            nav, text=">", width=30, height=40, corner_radius=20,
+            fg_color="transparent", hover_color=COLOR_HOVER,
+            command=lambda: self.change_time('month', 1)
+        ).pack(side="left")
 
-        row2 = ctk.CTkFrame(frame, fg_color="transparent"); row2.grid(row=2, column=0, sticky="ew", pady=(0, 25)); row2.grid_columnconfigure((0, 1, 2), weight=1, uniform="g2")
-        c3 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20); c3.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        ctk.CTkLabel(c3, text="PAYPAL (PENDING)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_paypal = ctk.CTkLabel(c3, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_WARNING); self.lbl_paypal.pack(padx=20, pady=(0, 0), anchor="w")
-        self.lbl_paypal_sub = ctk.CTkLabel(c3, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_paypal_sub.pack(padx=20, pady=(0, 20), anchor="w")
-        
-        c4 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20); c4.grid(row=0, column=1, sticky="ew", padx=10)
-        ctk.CTkLabel(c4, text="BANK (AVAILABLE)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_usd_savings = ctk.CTkLabel(c4, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN); self.lbl_usd_savings.pack(padx=20, pady=(0, 0), anchor="w")
-        self.lbl_usd_savings_sub = ctk.CTkLabel(c4, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_usd_savings_sub.pack(padx=20, pady=(0, 20), anchor="w")
-        
-        c5 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20); c5.grid(row=0, column=2, sticky="ew", padx=(10, 0))
-        ctk.CTkLabel(c5, text="LOCAL CASH (AVAILABLE)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_dzd_cash = ctk.CTkLabel(c5, text="--", font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN); self.lbl_dzd_cash.pack(padx=20, pady=(0, 20), anchor="w")
+        nav_yr = ctk.CTkFrame(header, fg_color=COLOR_CARD, corner_radius=50, height=40)
+        nav_yr.pack(side="left", padx=10)
+        ctk.CTkButton(
+            nav_yr, text="<", width=30, height=40, corner_radius=20,
+            fg_color="transparent", hover_color=COLOR_HOVER,
+            command=lambda: self.change_time('year', -1)
+        ).pack(side="left")
+        self.lbl_year_selector = ctk.CTkLabel(
+            nav_yr, text="Year", font=("Roboto Medium", 14), width=60
+        )
+        self.lbl_year_selector.pack(side="left", padx=5)
+        ctk.CTkButton(
+            nav_yr, text=">", width=30, height=40, corner_radius=20,
+            fg_color="transparent", hover_color=COLOR_HOVER,
+            command=lambda: self.change_time('year', 1)
+        ).pack(side="left")
 
+        nw = ctk.CTkFrame(header, fg_color="transparent")
+        nw.pack(side="right")
+        ctk.CTkLabel(
+            nw, text="TOTAL NET WORTH (All Assets + Savings)",
+            font=("Roboto", 11, "bold"), text_color=COLOR_TEXT_SUB
+        ).pack(anchor="e")
+        self.lbl_header_nw = ctk.CTkLabel(
+            nw, text="$0.00 | 0 DZD",
+            font=("Roboto", 26, "bold"), text_color="white"
+        )
+        self.lbl_header_nw.pack(anchor="e")
+
+        # --- Row 1: Income + Expenses this month ---
+        row1 = ctk.CTkFrame(frame, fg_color="transparent")
+        row1.grid(row=1, column=0, sticky="ew", pady=(0, 15))
+        row1.grid_columnconfigure((0, 1), weight=1, uniform="g1")
+
+        c1 = ctk.CTkFrame(row1, fg_color=COLOR_CARD, corner_radius=20)
+        c1.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        ctk.CTkLabel(
+            c1, text="INCOME THIS MONTH",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        self.lbl_month_earned = ctk.CTkLabel(
+            c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SUCCESS
+        )
+        self.lbl_month_earned.pack(padx=20, pady=(0, 20), anchor="w")
+
+        c2 = ctk.CTkFrame(row1, fg_color=COLOR_CARD, corner_radius=20)
+        c2.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        ctk.CTkLabel(
+            c2, text="EXPENSES THIS MONTH",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+
+        c2i = ctk.CTkFrame(c2, fg_color="transparent")
+        c2i.pack(padx=20, pady=(0, 20), anchor="w")
+
+        g1 = ctk.CTkFrame(c2i, fg_color="transparent")
+        g1.pack(side="left")
+        self.lbl_month_spent_usd = ctk.CTkLabel(
+            g1, text="$0.00", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER
+        )
+        self.lbl_month_spent_usd.pack(anchor="w")
+        self.lbl_month_spent_usd_sub = ctk.CTkLabel(
+            g1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB
+        )
+        self.lbl_month_spent_usd_sub.pack(anchor="w")
+
+        ctk.CTkLabel(
+            c2i, text="  |  ", font=("Roboto", 20), text_color=COLOR_TEXT_SUB
+        ).pack(side="left", padx=15)
+
+        g2 = ctk.CTkFrame(c2i, fg_color="transparent")
+        g2.pack(side="left")
+        self.lbl_month_spent_dzd = ctk.CTkLabel(
+            g2, text="0 DZD", font=("Roboto", 24, "bold"), text_color=COLOR_DANGER
+        )
+        self.lbl_month_spent_dzd.pack(anchor="w")
+        ctk.CTkLabel(g2, text=" ", font=("Roboto", 12)).pack(anchor="w")
+
+        # --- Row 2: PayPal / Bank / Local Cash ---
+        row2 = ctk.CTkFrame(frame, fg_color="transparent")
+        row2.grid(row=2, column=0, sticky="ew", pady=(0, 25))
+        row2.grid_columnconfigure((0, 1, 2), weight=1, uniform="g2")
+
+        c3 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20)
+        c3.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        ctk.CTkLabel(
+            c3, text="PAYPAL (PENDING)",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        self.lbl_paypal = ctk.CTkLabel(
+            c3, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_WARNING
+        )
+        self.lbl_paypal.pack(padx=20, anchor="w")
+        self.lbl_paypal_sub = ctk.CTkLabel(
+            c3, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB
+        )
+        self.lbl_paypal_sub.pack(padx=20, pady=(0, 20), anchor="w")
+
+        c4 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20)
+        c4.grid(row=0, column=1, sticky="ew", padx=10)
+        ctk.CTkLabel(
+            c4, text="BANK (AVAILABLE)",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        self.lbl_usd_savings = ctk.CTkLabel(
+            c4, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN
+        )
+        self.lbl_usd_savings.pack(padx=20, anchor="w")
+        self.lbl_usd_savings_sub = ctk.CTkLabel(
+            c4, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB
+        )
+        self.lbl_usd_savings_sub.pack(padx=20, pady=(0, 20), anchor="w")
+
+        c5 = ctk.CTkFrame(row2, fg_color=COLOR_CARD, corner_radius=20)
+        c5.grid(row=0, column=2, sticky="ew", padx=(10, 0))
+        ctk.CTkLabel(
+            c5, text="LOCAL CASH (AVAILABLE)",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        self.lbl_dzd_cash = ctk.CTkLabel(
+            c5, text="--", font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN
+        )
+        self.lbl_dzd_cash.pack(padx=20, pady=(0, 20), anchor="w")
+
+        # --- Filter row ---
         filter_row = ctk.CTkFrame(frame, fg_color="transparent")
         filter_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        ctk.CTkLabel(filter_row, text="Transactions this Month", font=FONT_SUBHEADER).pack(side="left")
-        
-        self.dash_filter_sort = ctk.CTkOptionMenu(filter_row, values=["Newest First", "Oldest First", "Highest Amount", "Lowest Amount"], fg_color=COLOR_INPUT, button_color=COLOR_INPUT, command=lambda _: self.update_dashboard_history())
+        ctk.CTkLabel(
+            filter_row, text="Transactions this Month", font=FONT_SUBHEADER
+        ).pack(side="left")
+
+        self.dash_filter_sort = ctk.CTkOptionMenu(
+            filter_row,
+            values=["Newest First", "Oldest First", "Highest Amount", "Lowest Amount"],
+            fg_color=COLOR_INPUT, button_color=COLOR_INPUT,
+            command=lambda _: self.update_dashboard_history()
+        )
         self.dash_filter_sort.pack(side="right", padx=(10, 0))
-        self.dash_filter_type = ctk.CTkOptionMenu(filter_row, values=["All Types", "Income", "Expense", "Transfer", "Savings"], fg_color=COLOR_INPUT, button_color=COLOR_INPUT, command=lambda _: self.update_dashboard_history())
+        self.dash_filter_type = ctk.CTkOptionMenu(
+            filter_row,
+            values=["All Types", "Income", "Expense", "Transfer", "Savings"],
+            fg_color=COLOR_INPUT, button_color=COLOR_INPUT,
+            command=lambda _: self.update_dashboard_history()
+        )
         self.dash_filter_type.pack(side="right")
 
-        self.dashboard_history_frame = ctk.CTkScrollableFrame(frame, fg_color="transparent", height=200); self.dashboard_history_frame.grid(row=4, column=0, sticky="nsew")
+        self.dashboard_history_frame = ctk.CTkScrollableFrame(
+            frame, fg_color="transparent", height=200
+        )
+        self.dashboard_history_frame.grid(row=4, column=0, sticky="nsew")
 
     def update_dashboard_history(self):
-        for w in self.dashboard_history_frame.winfo_children(): w.destroy()
-        
+        for w in self.dashboard_history_frame.winfo_children():
+            w.destroy()
+
         target_month = self.get_monthly_key()
         f_type = self.dash_filter_type.get()
         f_sort = self.dash_filter_sort.get()
@@ -439,36 +853,74 @@ class FinancialTrackerApp(ctk.CTk):
         for t in self.data["transactions"]:
             t_date = str(t.get('date', ''))
             t_type_val = str(t.get('type', ''))
-            if not t_date.startswith(target_month): continue
-            
+            if not t_date.startswith(target_month):
+                continue
+
             is_match = False
-            if f_type == "All Types": is_match = True
-            elif f_type == "Income" and t_type_val == 'income': is_match = True
-            elif f_type == "Expense" and t_type_val == 'expense': is_match = True
-            elif f_type == "Transfer" and 'transfer' in t_type_val: is_match = True
-            elif f_type == "Savings" and 'savings' in t_type_val: is_match = True
-            
-            if is_match: filtered.append(t)
+            if f_type == "All Types":
+                is_match = True
+            elif f_type == "Income" and t_type_val == 'income':
+                is_match = True
+            elif f_type == "Expense" and t_type_val == 'expense':
+                is_match = True
+            elif f_type == "Transfer" and 'transfer' in t_type_val:
+                is_match = True
+            elif f_type == "Savings" and 'savings' in t_type_val:
+                is_match = True
+
+            if is_match:
+                filtered.append(t)
 
         def safe_amount(x):
-            try: return float(x.get('amount', x.get('amount_usd', x.get('amount_sent', 0))))
-            except: return 0.0
+            try:
+                return float(
+                    x.get('amount', x.get('amount_usd', x.get('amount_sent', 0)))
+                )
+            except (ValueError, TypeError):
+                return 0.0
 
-        if f_sort == "Newest First": filtered.sort(key=lambda x: str(x.get('date', '')), reverse=True)
-        elif f_sort == "Oldest First": filtered.sort(key=lambda x: str(x.get('date', '')))
-        elif f_sort == "Highest Amount": filtered.sort(key=safe_amount, reverse=True)
-        elif f_sort == "Lowest Amount": filtered.sort(key=safe_amount)
+        if f_sort == "Newest First":
+            filtered.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+        elif f_sort == "Oldest First":
+            filtered.sort(key=lambda x: str(x.get('date', '')))
+        elif f_sort == "Highest Amount":
+            filtered.sort(key=safe_amount, reverse=True)
+        elif f_sort == "Lowest Amount":
+            filtered.sort(key=safe_amount)
 
-        for t in filtered: self.create_list_row_modern(self.dashboard_history_frame, t, simple=True)
+        if not filtered:
+            ctk.CTkLabel(
+                self.dashboard_history_frame,
+                text="No transactions this month.",
+                font=FONT_MAIN, text_color=COLOR_TEXT_SUB
+            ).pack(pady=30)
+        else:
+            for t in filtered:
+                self.create_list_row_modern(
+                    self.dashboard_history_frame, t, simple=True
+                )
 
+    # ================================================================
+    # FORM HELPERS
+    # ================================================================
     def create_form_container(self, parent, title):
-        parent.grid_columnconfigure(0, weight=1); parent.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(parent, text=title, font=FONT_HEADER).grid(row=0, column=0, sticky="w", pady=(0, 20))
-        c = ctk.CTkFrame(parent, fg_color="transparent"); c.grid(row=1, column=0, sticky="new"); c.grid_columnconfigure((0, 1), weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(parent, text=title, font=FONT_HEADER).grid(
+            row=0, column=0, sticky="w", pady=(0, 20)
+        )
+        c = ctk.CTkFrame(parent, fg_color="transparent")
+        c.grid(row=1, column=0, sticky="new")
+        c.grid_columnconfigure((0, 1), weight=1)
         return c
 
-    def create_input(self, p, ph): return ctk.CTkEntry(p, height=45, corner_radius=22, border_width=0, fg_color=COLOR_INPUT, text_color="white", placeholder_text=ph)
+    def create_input(self, p, ph):
+        return ctk.CTkEntry(
+            p, height=45, corner_radius=22, border_width=0,
+            fg_color=COLOR_INPUT, text_color="white", placeholder_text=ph
+        )
 
+    # --- FIX: Properly re-enable controls when switching back to USD ---
     def on_income_curr_change(self, choice):
         if choice == "DZD (Cash)":
             self.combo_fee_type.set("No Fee")
@@ -478,244 +930,640 @@ class FinancialTrackerApp(ctk.CTk):
             self.chk_paypal.configure(state="disabled")
         else:
             self.combo_fee_type.configure(state="normal")
+            self.entry_fee_val.configure(state="disabled")  # stays disabled until Manual is picked
             self.chk_paypal.configure(state="normal")
 
+    # ================================================================
+    # INCOME FRAME
+    # ================================================================
     def create_income_frame(self):
-        f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["income"] = f
+        f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.frames["income"] = f
         form = self.create_form_container(f, "Add Income")
-        self.entry_inc_name = self.create_input(form, "Source Name"); self.entry_inc_name.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
-        self.entry_inc_amount = self.create_input(form, "Gross Amount"); self.entry_inc_amount.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
-        
-        self.combo_inc_curr = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["USD (Online)", "DZD (Cash)"], command=self.on_income_curr_change)
+
+        self.entry_inc_name = self.create_input(form, "Source Name")
+        self.entry_inc_name.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
+        self.entry_inc_amount = self.create_input(form, "Gross Amount")
+        self.entry_inc_amount.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
+
+        self.combo_inc_curr = ctk.CTkComboBox(
+            form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0,
+            values=["USD (Online)", "DZD (Cash)"],
+            command=self.on_income_curr_change
+        )
         self.combo_inc_curr.grid(row=1, column=0, columnspan=2, padx=0, pady=10, sticky="ew")
 
-        self.combo_fee_type = ctk.CTkComboBox(form, height=45, corner_radius=22, border_width=0, fg_color=COLOR_INPUT, values=["No Fee", "Upwork (10%)", "Transaction Fee (Manual)"], command=lambda c: self.entry_fee_val.configure(state="normal" if "Manual" in c else "disabled")); self.combo_fee_type.grid(row=2, column=0, padx=(0, 10), pady=10, sticky="ew")
-        self.entry_fee_val = self.create_input(form, "Fee Amount ($)"); self.entry_fee_val.grid(row=2, column=1, padx=(10, 0), pady=10, sticky="ew"); self.entry_fee_val.configure(state="disabled")
-        
-        self.chk_paypal_var = ctk.StringVar(value="on"); self.chk_paypal = ctk.CTkCheckBox(form, text="Add to PayPal Balance (Unusable)", variable=self.chk_paypal_var, onvalue="on", offvalue="off", font=FONT_MAIN, fg_color=COLOR_PRIMARY)
-        self.chk_paypal.grid(row=3, column=0, columnspan=2, pady=15, sticky="w")
-        
-        ctk.CTkButton(form, text="Add Income", height=50, corner_radius=25, fg_color=COLOR_SUCCESS, font=FONT_BOLD, command=self.add_income).grid(row=4, column=0, columnspan=2, pady=20, sticky="ew")
-        ctk.CTkLabel(f, text="History", font=FONT_SUBHEADER).grid(row=2, column=0, sticky="w", pady=(30, 10)); self.income_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent"); self.income_list_frame.grid(row=3, column=0, sticky="nsew")
+        self.combo_fee_type = ctk.CTkComboBox(
+            form, height=45, corner_radius=22, border_width=0,
+            fg_color=COLOR_INPUT,
+            values=["No Fee", "Upwork (10%)", "Transaction Fee (Manual)"],
+            command=lambda c: self.entry_fee_val.configure(
+                state="normal" if "Manual" in c else "disabled"
+            )
+        )
+        self.combo_fee_type.grid(row=2, column=0, padx=(0, 10), pady=10, sticky="ew")
+        self.entry_fee_val = self.create_input(form, "Fee Amount ($)")
+        self.entry_fee_val.grid(row=2, column=1, padx=(10, 0), pady=10, sticky="ew")
+        self.entry_fee_val.configure(state="disabled")
 
+        self.chk_paypal_var = ctk.StringVar(value="on")
+        self.chk_paypal = ctk.CTkCheckBox(
+            form, text="Add to PayPal Balance (Unusable)",
+            variable=self.chk_paypal_var, onvalue="on", offvalue="off",
+            font=FONT_MAIN, fg_color=COLOR_PRIMARY
+        )
+        self.chk_paypal.grid(row=3, column=0, columnspan=2, pady=15, sticky="w")
+
+        ctk.CTkButton(
+            form, text="Add Income", height=50, corner_radius=25,
+            fg_color=COLOR_SUCCESS, font=FONT_BOLD, command=self.add_income
+        ).grid(row=4, column=0, columnspan=2, pady=20, sticky="ew")
+
+        ctk.CTkLabel(f, text="History", font=FONT_SUBHEADER).grid(
+            row=2, column=0, sticky="w", pady=(30, 10)
+        )
+        self.income_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
+        self.income_list_frame.grid(row=3, column=0, sticky="nsew")
+
+    # ================================================================
+    # TRANSFER FRAME
+    # ================================================================
     def fill_max_paypal(self):
         b = self.calculate_stats()['paypal_balance']
         self.entry_pp_amount.delete(0, 'end')
-        self.entry_pp_amount.insert(0, str(b))
+        self.entry_pp_amount.insert(0, str(round(b, 2)))
 
     def create_transfer_frame(self):
-        f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["transfer"] = f
-        tv = ctk.CTkTabview(f, fg_color="transparent", segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_PRIMARY, corner_radius=20)
-        tv.pack(fill="x", expand=False) 
-        
-        t1 = tv.add("PayPal -> Bank"); t2 = tv.add("Sell USD -> DZD")
-        
-        c1 = ctk.CTkFrame(t1, fg_color="transparent"); c1.pack(fill="x", padx=20, pady=10)
-        pp_amt_row = ctk.CTkFrame(c1, fg_color="transparent"); pp_amt_row.pack(fill="x", pady=10)
-        self.entry_pp_amount = self.create_input(pp_amt_row, "Amount ($)"); self.entry_pp_amount.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        ctk.CTkButton(pp_amt_row, text="Max", width=60, height=45, corner_radius=22, fg_color=COLOR_INPUT, hover_color=COLOR_HOVER, command=self.fill_max_paypal).pack(side="right")
+        f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.frames["transfer"] = f
 
-        self.combo_pp_method = ctk.CTkComboBox(c1, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Automatic (Free)", "Manual ($5 Fee)"]); self.combo_pp_method.pack(fill="x", pady=10)
-        ctk.CTkButton(c1, text="Process", height=50, corner_radius=25, fg_color=COLOR_WARNING, font=FONT_BOLD, command=self.transfer_paypal_to_bank).pack(fill="x", pady=20)
-        
-        c2 = ctk.CTkFrame(t2, fg_color="transparent"); c2.pack(fill="x", padx=20, pady=10)
-        self.entry_ex_usd = self.create_input(c2, "Amount ($)"); self.entry_ex_usd.pack(fill="x", pady=10)
-        self.entry_ex_rate = self.create_input(c2, "Rate"); self.entry_ex_rate.pack(fill="x", pady=10)
-        ctk.CTkButton(c2, text="Confirm Sale", height=50, corner_radius=25, fg_color=COLOR_PRIMARY, font=FONT_BOLD, command=self.transfer_usd_to_dzd).pack(fill="x", pady=20)
-        
-        ctk.CTkLabel(f, text="Transfer History", font=FONT_SUBHEADER).pack(anchor="w", pady=(20, 10))
+        tv = ctk.CTkTabview(
+            f, fg_color="transparent",
+            segmented_button_fg_color=COLOR_INPUT,
+            segmented_button_selected_color=COLOR_PRIMARY,
+            corner_radius=20
+        )
+        tv.pack(fill="x", expand=False)
+
+        t1 = tv.add("PayPal -> Bank")
+        t2 = tv.add("Sell USD -> DZD")
+
+        # Tab 1: PayPal -> Bank
+        c1 = ctk.CTkFrame(t1, fg_color="transparent")
+        c1.pack(fill="x", padx=20, pady=10)
+
+        pp_amt_row = ctk.CTkFrame(c1, fg_color="transparent")
+        pp_amt_row.pack(fill="x", pady=10)
+        self.entry_pp_amount = self.create_input(pp_amt_row, "Amount ($)")
+        self.entry_pp_amount.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ctk.CTkButton(
+            pp_amt_row, text="Max", width=60, height=45, corner_radius=22,
+            fg_color=COLOR_INPUT, hover_color=COLOR_HOVER,
+            command=self.fill_max_paypal
+        ).pack(side="right")
+
+        self.combo_pp_method = ctk.CTkComboBox(
+            c1, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0,
+            values=["Automatic (Free)", "Manual ($5 Fee)"]
+        )
+        self.combo_pp_method.pack(fill="x", pady=10)
+        ctk.CTkButton(
+            c1, text="Process", height=50, corner_radius=25,
+            fg_color=COLOR_WARNING, font=FONT_BOLD,
+            command=self.transfer_paypal_to_bank
+        ).pack(fill="x", pady=20)
+
+        # Tab 2: Sell USD -> DZD
+        c2 = ctk.CTkFrame(t2, fg_color="transparent")
+        c2.pack(fill="x", padx=20, pady=10)
+        self.entry_ex_usd = self.create_input(c2, "Amount ($)")
+        self.entry_ex_usd.pack(fill="x", pady=10)
+        self.entry_ex_rate = self.create_input(c2, "Rate")
+        self.entry_ex_rate.pack(fill="x", pady=10)
+        ctk.CTkButton(
+            c2, text="Confirm Sale", height=50, corner_radius=25,
+            fg_color=COLOR_PRIMARY, font=FONT_BOLD,
+            command=self.transfer_usd_to_dzd
+        ).pack(fill="x", pady=20)
+
+        ctk.CTkLabel(f, text="Transfer History", font=FONT_SUBHEADER).pack(
+            anchor="w", pady=(20, 10)
+        )
         self.transfer_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
         self.transfer_list_frame.pack(fill="both", expand=True)
 
+    # ================================================================
+    # EXPENSES FRAME
+    # ================================================================
     def create_expenses_frame(self):
-        f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["expenses"] = f
+        f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.frames["expenses"] = f
         form = self.create_form_container(f, "Record Expense")
-        self.entry_exp_desc = self.create_input(form, "Description"); self.entry_exp_desc.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
-        self.entry_exp_amount = self.create_input(form, "Amount"); self.entry_exp_amount.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
-        self.combo_exp_cat = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Essentials", "Debt", "Luxury", "Business", "Other"]); self.combo_exp_cat.grid(row=1, column=0, padx=(0, 10), pady=10, sticky="ew")
-        self.combo_exp_curr = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["DZD (Cash)", "USD (Online)"]); self.combo_exp_curr.grid(row=1, column=1, padx=(10, 0), pady=10, sticky="ew")
-        ctk.CTkButton(form, text="Record", height=50, corner_radius=25, fg_color=COLOR_DANGER, font=FONT_BOLD, command=self.add_expense).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
-        ctk.CTkLabel(f, text="Recent", font=FONT_SUBHEADER).grid(row=2, column=0, sticky="w", pady=(30, 10)); self.expense_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent"); self.expense_list_frame.grid(row=3, column=0, sticky="nsew")
 
+        self.entry_exp_desc = self.create_input(form, "Description")
+        self.entry_exp_desc.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
+        self.entry_exp_amount = self.create_input(form, "Amount")
+        self.entry_exp_amount.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
+
+        self.combo_exp_cat = ctk.CTkComboBox(
+            form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0,
+            values=["Essentials", "Debt", "Luxury", "Business", "Other"]
+        )
+        self.combo_exp_cat.grid(row=1, column=0, padx=(0, 10), pady=10, sticky="ew")
+        self.combo_exp_curr = ctk.CTkComboBox(
+            form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0,
+            values=["DZD (Cash)", "USD (Online)"]
+        )
+        self.combo_exp_curr.grid(row=1, column=1, padx=(10, 0), pady=10, sticky="ew")
+
+        ctk.CTkButton(
+            form, text="Record", height=50, corner_radius=25,
+            fg_color=COLOR_DANGER, font=FONT_BOLD, command=self.add_expense
+        ).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
+
+        ctk.CTkLabel(f, text="Recent", font=FONT_SUBHEADER).grid(
+            row=2, column=0, sticky="w", pady=(30, 10)
+        )
+        self.expense_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
+        self.expense_list_frame.grid(row=3, column=0, sticky="nsew")
+
+    # ================================================================
+    # SAVINGS FRAME
+    # ================================================================
     def create_savings_frame(self):
-        f = ctk.CTkFrame(self.main_frame, fg_color="transparent"); self.frames["savings"] = f
-        f.grid_columnconfigure((0, 1), weight=1); f.grid_rowconfigure(3, weight=1) 
+        f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.frames["savings"] = f
+        f.grid_columnconfigure((0, 1), weight=1)
+        f.grid_rowconfigure(3, weight=1)
 
-        c1 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c1.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 20))
-        ctk.CTkLabel(c1, text="USD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_vault_usd = ctk.CTkLabel(c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_usd.pack(padx=20, pady=(0, 0), anchor="w")
-        self.lbl_vault_usd_sub = ctk.CTkLabel(c1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB); self.lbl_vault_usd_sub.pack(padx=20, pady=(0, 20), anchor="w")
+        c1 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20)
+        c1.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 20))
+        ctk.CTkLabel(
+            c1, text="USD VAULT (LOCKED)",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        self.lbl_vault_usd = ctk.CTkLabel(
+            c1, text="$0.00", font=FONT_NUMBERS, text_color=COLOR_SAVINGS
+        )
+        self.lbl_vault_usd.pack(padx=20, anchor="w")
+        self.lbl_vault_usd_sub = ctk.CTkLabel(
+            c1, text="≈ 0 DZD", font=("Roboto", 12), text_color=COLOR_TEXT_SUB
+        )
+        self.lbl_vault_usd_sub.pack(padx=20, pady=(0, 20), anchor="w")
 
-        c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20); c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 20))
-        ctk.CTkLabel(c2, text="DZD VAULT (LOCKED)", font=("Roboto", 13), text_color=COLOR_TEXT_SUB).pack(padx=20, pady=(20, 5), anchor="w")
-        self.lbl_vault_dzd = ctk.CTkLabel(c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS); self.lbl_vault_dzd.pack(padx=20, pady=(0, 0), anchor="w")
-        
-        # FIX: Removed transparent text color here as well
-        ctk.CTkLabel(c2, text=" ", font=("Roboto", 12)).pack(padx=20, pady=(0, 20), anchor="w") 
+        c2 = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=20)
+        c2.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 20))
+        ctk.CTkLabel(
+            c2, text="DZD VAULT (LOCKED)",
+            font=("Roboto", 13), text_color=COLOR_TEXT_SUB
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        self.lbl_vault_dzd = ctk.CTkLabel(
+            c2, text="0 DZD", font=FONT_NUMBERS, text_color=COLOR_SAVINGS
+        )
+        self.lbl_vault_dzd.pack(padx=20, anchor="w")
+        ctk.CTkLabel(c2, text=" ", font=("Roboto", 12)).pack(
+            padx=20, pady=(0, 20), anchor="w"
+        )
 
-        form_wrapper = ctk.CTkFrame(f, fg_color="transparent"); form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        form_wrapper = ctk.CTkFrame(f, fg_color="transparent")
+        form_wrapper.grid(row=1, column=0, columnspan=2, sticky="nsew")
 
         form = self.create_form_container(form_wrapper, "Manage Savings")
-        self.combo_sav_action = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["Lock into Savings", "Withdraw to Available"]); self.combo_sav_action.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
-        self.combo_sav_curr = ctk.CTkComboBox(form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0, values=["USD", "DZD"]); self.combo_sav_curr.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
-        
-        self.entry_sav_amount = self.create_input(form, "Amount"); self.entry_sav_amount.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
-        ctk.CTkButton(form, text="Confirm", height=50, corner_radius=25, fg_color=COLOR_SAVINGS, font=FONT_BOLD, command=self.manage_savings).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
+        self.combo_sav_action = ctk.CTkComboBox(
+            form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0,
+            values=["Lock into Savings", "Withdraw to Available"]
+        )
+        self.combo_sav_action.grid(row=0, column=0, padx=(0, 10), pady=10, sticky="ew")
+        self.combo_sav_curr = ctk.CTkComboBox(
+            form, height=45, corner_radius=22, fg_color=COLOR_INPUT, border_width=0,
+            values=["USD", "DZD"]
+        )
+        self.combo_sav_curr.grid(row=0, column=1, padx=(10, 0), pady=10, sticky="ew")
 
-        ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER).grid(row=2, column=0, columnspan=2, sticky="w", pady=(20, 10))
-        self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent"); self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        self.entry_sav_amount = self.create_input(form, "Amount")
+        self.entry_sav_amount.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
+        ctk.CTkButton(
+            form, text="Confirm", height=50, corner_radius=25,
+            fg_color=COLOR_SAVINGS, font=FONT_BOLD, command=self.manage_savings
+        ).grid(row=2, column=0, columnspan=2, pady=20, sticky="ew")
 
-    # --- ACTIONS ---
+        ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(20, 10)
+        )
+        self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent")
+        self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
+
+    # ================================================================
+    # ACTIONS (with proper validation)
+    # ================================================================
     def add_income(self):
-        try:
-            val = float(self.entry_inc_amount.get()); curr = "DZD" if "DZD" in self.combo_inc_curr.get() else "USD"
-            if curr == "DZD": fee = 0.0; fee_type = "No Fee"; to_paypal = False
-            else:
-                fee_type = self.combo_fee_type.get()
-                fee = float(self.entry_fee_val.get()) if "Manual" in fee_type else (val*0.1 if "Upwork" in fee_type else 0)
-                to_paypal = self.chk_paypal_var.get() == "on"
+        name = self.entry_inc_name.get().strip()
+        raw_amount = self.entry_inc_amount.get().strip()
 
-            t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"income", "category":self.entry_inc_name.get(), "amount":val, "currency":curr, "fee_type":fee_type, "fee_amount":fee, "net_amount":val-fee, "to_paypal":to_paypal}
-            if self.add_transaction_to_db(t):
-                self.entry_inc_name.delete(0, 'end'); self.entry_inc_amount.delete(0, 'end'); self.entry_fee_val.delete(0, 'end')
-                self.show_success_native("Income Added")
-        except Exception: self.show_error_native("Invalid Input")
+        if not name:
+            self.show_error_native("Please enter a source name.")
+            return
+        try:
+            val = float(raw_amount)
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            self.show_error_native("Please enter a valid positive amount.")
+            return
+
+        curr = "DZD" if "DZD" in self.combo_inc_curr.get() else "USD"
+
+        if curr == "DZD":
+            fee = 0.0
+            fee_type = "No Fee"
+            to_paypal = False
+        else:
+            fee_type = self.combo_fee_type.get()
+            if "Manual" in fee_type:
+                try:
+                    fee = float(self.entry_fee_val.get())
+                    if fee < 0:
+                        raise ValueError
+                except ValueError:
+                    self.show_error_native("Please enter a valid fee amount.")
+                    return
+            elif "Upwork" in fee_type:
+                fee = val * 0.1
+            else:
+                fee = 0
+            to_paypal = self.chk_paypal_var.get() == "on"
+
+        if fee > val:
+            self.show_error_native("Fee cannot exceed the income amount.")
+            return
+
+        t = {
+            "id": str(uuid.uuid4()),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "income",
+            "category": name,
+            "amount": val,
+            "currency": curr,
+            "fee_type": fee_type,
+            "fee_amount": fee,
+            "net_amount": val - fee,
+            "to_paypal": to_paypal,
+        }
+        if self.add_transaction_to_db(t):
+            self.entry_inc_name.delete(0, 'end')
+            self.entry_inc_amount.delete(0, 'end')
+            self.entry_fee_val.configure(state="normal")
+            self.entry_fee_val.delete(0, 'end')
+            self.entry_fee_val.configure(state="disabled")
+            self.show_success_native("Income Added")
 
     def transfer_paypal_to_bank(self):
         try:
-            amt = float(self.entry_pp_amount.get()); fee = 5.0 if "Manual" in self.combo_pp_method.get() else 0
-            if self.calculate_stats()['paypal_balance'] < amt: self.show_error_native("Insufficient Funds"); return
-            t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"transfer_paypal_bank", "amount_sent":amt, "fee_paid":fee, "amount_received":amt-fee}
-            if self.add_transaction_to_db(t):
-                self.entry_pp_amount.delete(0, 'end')
-                self.show_success_native("Transfer Complete")
-        except Exception: self.show_error_native("Invalid Input")
+            amt = float(self.entry_pp_amount.get())
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            self.show_error_native("Please enter a valid positive amount.")
+            return
+
+        fee = 5.0 if "Manual" in self.combo_pp_method.get() else 0
+
+        # --- FIX: Re-fetch fresh stats right before balance check ---
+        self._cached_stats = None
+        stats = self.calculate_stats()
+        if stats['paypal_balance'] < amt:
+            self.show_error_native(
+                f"Insufficient PayPal balance.\n"
+                f"Available: ${stats['paypal_balance']:,.2f}"
+            )
+            return
+
+        if amt - fee <= 0:
+            self.show_error_native("Amount after fee would be zero or negative.")
+            return
+
+        t = {
+            "id": str(uuid.uuid4()),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "transfer_paypal_bank",
+            "amount_sent": amt,
+            "fee_paid": fee,
+            "amount_received": amt - fee,
+        }
+        if self.add_transaction_to_db(t):
+            self.entry_pp_amount.delete(0, 'end')
+            self.show_success_native("Transfer Complete")
 
     def transfer_usd_to_dzd(self):
         try:
-            usd = float(self.entry_ex_usd.get()); rate = float(self.entry_ex_rate.get())
-            if self.calculate_stats()['usd_savings'] < usd: self.show_error_native("Insufficient USD"); return
-            t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"transfer_usd_dzd", "amount_usd":usd, "rate":rate, "amount_dzd":usd*rate}
-            if self.add_transaction_to_db(t):
-                self.entry_ex_usd.delete(0, 'end'); self.entry_ex_rate.delete(0, 'end')
-                self.show_success_native("Exchange Complete")
-        except Exception: self.show_error_native("Invalid Input")
+            usd = float(self.entry_ex_usd.get())
+            rate = float(self.entry_ex_rate.get())
+            if usd <= 0 or rate <= 0:
+                raise ValueError
+        except ValueError:
+            self.show_error_native("Please enter valid positive numbers for amount and rate.")
+            return
+
+        self._cached_stats = None
+        stats = self.calculate_stats()
+        if stats['usd_savings'] < usd:
+            self.show_error_native(
+                f"Insufficient Bank USD.\nAvailable: ${stats['usd_savings']:,.2f}"
+            )
+            return
+
+        t = {
+            "id": str(uuid.uuid4()),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "transfer_usd_dzd",
+            "amount_usd": usd,
+            "rate": rate,
+            "amount_dzd": usd * rate,
+        }
+        if self.add_transaction_to_db(t):
+            self.entry_ex_usd.delete(0, 'end')
+            self.entry_ex_rate.delete(0, 'end')
+            self.show_success_native("Exchange Complete")
 
     def add_expense(self):
+        desc = self.entry_exp_desc.get().strip()
+        raw_amount = self.entry_exp_amount.get().strip()
+
+        if not desc:
+            self.show_error_native("Please enter a description.")
+            return
         try:
-            amt = float(self.entry_exp_amount.get()); curr = "USD" if "USD" in self.combo_exp_curr.get() else "DZD"
-            s = self.calculate_stats()
-            if (curr=="USD" and s['usd_savings']<amt) or (curr=="DZD" and s['dzd_cash']<amt): self.show_error_native("Insufficient Funds"); return
-            t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type":"expense", "category":f"{self.combo_exp_cat.get()} - {self.entry_exp_desc.get()}", "amount":amt, "currency":curr}
-            if self.add_transaction_to_db(t):
-                self.entry_exp_desc.delete(0, 'end'); self.entry_exp_amount.delete(0, 'end')
-                self.show_success_native("Expense Added")
-        except Exception: self.show_error_native("Invalid Input")
+            amt = float(raw_amount)
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            self.show_error_native("Please enter a valid positive amount.")
+            return
+
+        curr = "USD" if "USD" in self.combo_exp_curr.get() else "DZD"
+
+        self._cached_stats = None
+        s = self.calculate_stats()
+        if curr == "USD" and s['usd_savings'] < amt:
+            self.show_error_native(
+                f"Insufficient Bank USD.\nAvailable: ${s['usd_savings']:,.2f}"
+            )
+            return
+        if curr == "DZD" and s['dzd_cash'] < amt:
+            self.show_error_native(
+                f"Insufficient Local DZD.\nAvailable: {s['dzd_cash']:,.2f} DZD"
+            )
+            return
+
+        t = {
+            "id": str(uuid.uuid4()),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "expense",
+            "category": f"{self.combo_exp_cat.get()} - {desc}",
+            "amount": amt,
+            "currency": curr,
+        }
+        if self.add_transaction_to_db(t):
+            self.entry_exp_desc.delete(0, 'end')
+            self.entry_exp_amount.delete(0, 'end')
+            self.show_success_native("Expense Added")
 
     def manage_savings(self):
         try:
-            amt = float(self.entry_sav_amount.get()); curr = self.combo_sav_curr.get(); action = self.combo_sav_action.get()
-            t_type = 'savings_deposit' if 'Lock' in action else 'savings_withdraw'; s = self.calculate_stats()
+            amt = float(self.entry_sav_amount.get())
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            self.show_error_native("Please enter a valid positive amount.")
+            return
 
-            if t_type == 'savings_deposit':
-                if curr == 'USD' and s['usd_savings'] < amt: self.show_error_native("Insufficient Bank USD to lock."); return
-                if curr == 'DZD' and s['dzd_cash'] < amt: self.show_error_native("Insufficient Local DZD to lock."); return
-            else:
-                if curr == 'USD' and s['usd_locked'] < amt: self.show_error_native("Insufficient Locked USD to withdraw."); return
-                if curr == 'DZD' and s['dzd_locked'] < amt: self.show_error_native("Insufficient Locked DZD to withdraw."); return
+        curr = self.combo_sav_curr.get()
+        action = self.combo_sav_action.get()
+        t_type = 'savings_deposit' if 'Lock' in action else 'savings_withdraw'
 
-            t = {"id":str(uuid.uuid4()), "date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": t_type, "amount":amt, "currency":curr}
-            if self.add_transaction_to_db(t):
-                self.entry_sav_amount.delete(0, 'end')
-                self.show_success_native("Savings Vault Updated")
-        except Exception: self.show_error_native("Invalid Input")
+        self._cached_stats = None
+        s = self.calculate_stats()
 
+        if t_type == 'savings_deposit':
+            if curr == 'USD' and s['usd_savings'] < amt:
+                self.show_error_native(
+                    f"Insufficient Bank USD to lock.\nAvailable: ${s['usd_savings']:,.2f}"
+                )
+                return
+            if curr == 'DZD' and s['dzd_cash'] < amt:
+                self.show_error_native(
+                    f"Insufficient Local DZD to lock.\nAvailable: {s['dzd_cash']:,.2f} DZD"
+                )
+                return
+        else:
+            if curr == 'USD' and s['usd_locked'] < amt:
+                self.show_error_native(
+                    f"Insufficient Locked USD.\nLocked: ${s['usd_locked']:,.2f}"
+                )
+                return
+            if curr == 'DZD' and s['dzd_locked'] < amt:
+                self.show_error_native(
+                    f"Insufficient Locked DZD.\nLocked: {s['dzd_locked']:,.2f} DZD"
+                )
+                return
+
+        t = {
+            "id": str(uuid.uuid4()),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": t_type,
+            "amount": amt,
+            "currency": curr,
+        }
+        if self.add_transaction_to_db(t):
+            self.entry_sav_amount.delete(0, 'end')
+            self.show_success_native("Savings Vault Updated")
+
+    # ================================================================
+    # LIST ROW RENDERING
+    # ================================================================
     def create_list_row_modern(self, parent, t, simple=False):
-        row = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=15); row.pack(fill="x", pady=4)
-        main_txt, sub_txt, amt_txt, amt_sub_txt, col = "", "", "", "", COLOR_TEXT_MAIN
-        
+        row = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=15)
+        row.pack(fill="x", pady=4)
+
+        main_txt, sub_txt, amt_txt, amt_sub_txt = "", "", "", ""
+        col = COLOR_TEXT_MAIN
+
         t_type = t.get('type', 'unknown')
         t_date = str(t.get('date', 'Unknown Date'))
         display_date = t_date[:16] if t_date != 'Unknown Date' else t_date
-        
-        try: disp_rate = float(self.data.get("settings", {}).get("display_rate", 200.0))
-        except: disp_rate = 200.0
-        
+
+        try:
+            disp_rate = float(
+                self.data.get("settings", {}).get("display_rate", 200.0)
+            )
+        except (ValueError, TypeError):
+            disp_rate = 200.0
+        if disp_rate <= 0:
+            disp_rate = 200.0
+
         def safe_f(key):
-            try: return float(t.get(key, 0.0))
-            except: return 0.0
+            try:
+                return float(t.get(key, 0.0))
+            except (ValueError, TypeError):
+                return 0.0
 
         net_amt = safe_f('net_amount')
-        if net_amt == 0.0: net_amt = safe_f('amount')
+        if net_amt == 0.0:
+            net_amt = safe_f('amount')
         base_amt = safe_f('amount')
 
-        if t_type == 'income': 
+        if t_type == 'income':
             main_txt = str(t.get('category', 'Income'))
-            dest = 'Local Cash' if t.get('currency') == 'DZD' else ('PayPal' if t.get('to_paypal') else 'Bank')
+            dest = 'Local Cash' if t.get('currency') == 'DZD' else (
+                'PayPal' if t.get('to_paypal') else 'Bank'
+            )
             sub_txt = f"{display_date} • {dest}"
-            if t.get('currency') == 'DZD': amt_txt = f"+ {net_amt:,.2f} DZD"
-            else: amt_txt = f"+ ${net_amt:,.2f}"; amt_sub_txt = f"≈ {net_amt * disp_rate:,.0f} DZD"
+            if t.get('currency') == 'DZD':
+                amt_txt = f"+ {net_amt:,.2f} DZD"
+            else:
+                amt_txt = f"+ ${net_amt:,.2f}"
+                amt_sub_txt = f"≈ {net_amt * disp_rate:,.0f} DZD"
             col = COLOR_SUCCESS
-            
-        elif t_type == 'expense': 
-            main_txt = str(t.get('category', 'Expense')); sub_txt = display_date
-            if t.get('currency') == 'USD': amt_txt = f"- ${base_amt:,.2f}"; amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
-            else: amt_txt = f"- {base_amt:,.2f} DZD"
+
+        elif t_type == 'expense':
+            main_txt = str(t.get('category', 'Expense'))
+            sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"- ${base_amt:,.2f}"
+                amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
+            else:
+                amt_txt = f"- {base_amt:,.2f} DZD"
             col = COLOR_DANGER
-            
+
         elif t_type == 'transfer_usd_dzd':
-            main_txt = "Sold USD"; sub_txt = f"{display_date} • Rate: {t.get('rate', '')}"
-            amt_txt = f"+ {safe_f('amount_dzd'):,.2f} DZD"; amt_sub_txt = f"- ${safe_f('amount_usd'):,.2f}"
+            main_txt = "Sold USD"
+            sub_txt = f"{display_date} • Rate: {t.get('rate', '')}"
+            amt_txt = f"+ {safe_f('amount_dzd'):,.2f} DZD"
+            amt_sub_txt = f"- ${safe_f('amount_usd'):,.2f}"
             col = COLOR_PRIMARY
-            
+
         elif t_type == 'transfer_paypal_bank':
-            main_txt = "PayPal Transfer"; sub_txt = f"{display_date} • Fee: ${safe_f('fee_paid')}"
-            amt_txt = f"${safe_f('amount_received'):,.2f}"; amt_sub_txt = f"≈ {safe_f('amount_received') * disp_rate:,.0f} DZD"
+            main_txt = "PayPal Transfer"
+            sub_txt = f"{display_date} • Fee: ${safe_f('fee_paid')}"
+            amt_txt = f"${safe_f('amount_received'):,.2f}"
+            amt_sub_txt = f"≈ {safe_f('amount_received') * disp_rate:,.0f} DZD"
             col = COLOR_WARNING
-            
+
         elif t_type == 'savings_deposit':
-            main_txt = "Locked to Savings"; sub_txt = display_date
-            if t.get('currency') == 'USD': amt_txt = f"${base_amt:,.2f}"; amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
-            else: amt_txt = f"{base_amt:,.2f} DZD"
+            main_txt = "Locked to Savings"
+            sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"${base_amt:,.2f}"
+                amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
+            else:
+                amt_txt = f"{base_amt:,.2f} DZD"
             col = COLOR_SAVINGS
-            
+
         elif t_type == 'savings_withdraw':
-            main_txt = "Unlocked from Savings"; sub_txt = display_date
-            if t.get('currency') == 'USD': amt_txt = f"${base_amt:,.2f}"; amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
-            else: amt_txt = f"{base_amt:,.2f} DZD"
+            main_txt = "Unlocked from Savings"
+            sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"${base_amt:,.2f}"
+                amt_sub_txt = f"≈ {base_amt * disp_rate:,.0f} DZD"
+            else:
+                amt_txt = f"{base_amt:,.2f} DZD"
             col = COLOR_TEXT_SUB
 
-        elif 'transfer' in t_type or t_type == 'transfer':
-            main_txt = "Legacy Transfer"; sub_txt = display_date; amt_txt = "Processed"; col = COLOR_PRIMARY
-        
-        tf = ctk.CTkFrame(row, fg_color="transparent"); tf.pack(side="left", padx=15, pady=12)
-        ctk.CTkLabel(tf, text=main_txt, font=("Roboto Medium", 14)).pack(anchor="w"); ctk.CTkLabel(tf, text=sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="w")
-        if not simple: ctk.CTkButton(row, text="×", width=30, height=30, corner_radius=15, fg_color=COLOR_HOVER, hover_color=COLOR_DANGER, command=lambda _id=t.get('id', ''): self.delete_transaction(_id)).pack(side="right", padx=(5, 15))
-        
-        amt_f = ctk.CTkFrame(row, fg_color="transparent"); amt_f.pack(side="right", padx=10, pady=12)
-        ctk.CTkLabel(amt_f, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col).pack(anchor="e")
-        if amt_sub_txt: ctk.CTkLabel(amt_f, text=amt_sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB).pack(anchor="e")
+        elif 'transfer' in t_type:
+            main_txt = "Legacy Transfer"
+            sub_txt = display_date
+            amt_txt = "Processed"
+            col = COLOR_PRIMARY
 
-    def update_income_list(self): 
-        for w in self.income_list_frame.winfo_children(): w.destroy()
-        for t in reversed(self.data.get("transactions", [])): 
-            if t.get('type') == 'income' and str(t.get('date', '')).startswith(self.get_monthly_key()): self.create_list_row_modern(self.income_list_frame, t)
-    
+        tf = ctk.CTkFrame(row, fg_color="transparent")
+        tf.pack(side="left", padx=15, pady=12)
+        ctk.CTkLabel(tf, text=main_txt, font=("Roboto Medium", 14)).pack(anchor="w")
+        ctk.CTkLabel(
+            tf, text=sub_txt, font=("Roboto", 11), text_color=COLOR_TEXT_SUB
+        ).pack(anchor="w")
+
+        if not simple:
+            ctk.CTkButton(
+                row, text="×", width=30, height=30, corner_radius=15,
+                fg_color=COLOR_HOVER, hover_color=COLOR_DANGER,
+                command=lambda _id=t.get('id', ''): self.delete_transaction(_id)
+            ).pack(side="right", padx=(5, 15))
+
+        amt_f = ctk.CTkFrame(row, fg_color="transparent")
+        amt_f.pack(side="right", padx=10, pady=12)
+        ctk.CTkLabel(
+            amt_f, text=amt_txt, font=("Roboto", 14, "bold"), text_color=col
+        ).pack(anchor="e")
+        if amt_sub_txt:
+            ctk.CTkLabel(
+                amt_f, text=amt_sub_txt,
+                font=("Roboto", 11), text_color=COLOR_TEXT_SUB
+            ).pack(anchor="e")
+
+    # ================================================================
+    # LIST UPDATES (month-filtered consistently)
+    # ================================================================
+    def update_income_list(self):
+        for w in self.income_list_frame.winfo_children():
+            w.destroy()
+        month_key = self.get_monthly_key()
+        found = False
+        for t in reversed(self.data.get("transactions", [])):
+            if t.get('type') == 'income' and str(t.get('date', '')).startswith(month_key):
+                self.create_list_row_modern(self.income_list_frame, t)
+                found = True
+        if not found:
+            ctk.CTkLabel(
+                self.income_list_frame, text="No income this month.",
+                font=FONT_MAIN, text_color=COLOR_TEXT_SUB
+            ).pack(pady=20)
+
     def update_expense_list(self):
-        for w in self.expense_list_frame.winfo_children(): w.destroy()
-        for t in reversed(self.data.get("transactions", [])): 
-            if t.get('type') == 'expense' and str(t.get('date', '')).startswith(self.get_monthly_key()): self.create_list_row_modern(self.expense_list_frame, t)
+        for w in self.expense_list_frame.winfo_children():
+            w.destroy()
+        month_key = self.get_monthly_key()
+        found = False
+        for t in reversed(self.data.get("transactions", [])):
+            if t.get('type') == 'expense' and str(t.get('date', '')).startswith(month_key):
+                self.create_list_row_modern(self.expense_list_frame, t)
+                found = True
+        if not found:
+            ctk.CTkLabel(
+                self.expense_list_frame, text="No expenses this month.",
+                font=FONT_MAIN, text_color=COLOR_TEXT_SUB
+            ).pack(pady=20)
 
+    # --- FIX: Transfer and savings lists now show all-time but with a label ---
     def update_transfer_list(self):
-        for w in self.transfer_list_frame.winfo_children(): w.destroy()
-        for t in reversed(self.data.get("transactions", [])): 
-            if 'transfer' in str(t.get('type', '')): self.create_list_row_modern(self.transfer_list_frame, t)
+        for w in self.transfer_list_frame.winfo_children():
+            w.destroy()
+        found = False
+        for t in reversed(self.data.get("transactions", [])):
+            if 'transfer' in str(t.get('type', '')):
+                self.create_list_row_modern(self.transfer_list_frame, t)
+                found = True
+        if not found:
+            ctk.CTkLabel(
+                self.transfer_list_frame, text="No transfers yet.",
+                font=FONT_MAIN, text_color=COLOR_TEXT_SUB
+            ).pack(pady=20)
 
     def update_savings_list(self):
-        if not hasattr(self, 'savings_list_frame'): return
-        for w in self.savings_list_frame.winfo_children(): w.destroy()
-        for t in reversed(self.data.get("transactions", [])): 
-            if 'savings' in str(t.get('type', '')): self.create_list_row_modern(self.savings_list_frame, t)
+        if not hasattr(self, 'savings_list_frame'):
+            return
+        for w in self.savings_list_frame.winfo_children():
+            w.destroy()
+        found = False
+        for t in reversed(self.data.get("transactions", [])):
+            if 'savings' in str(t.get('type', '')):
+                self.create_list_row_modern(self.savings_list_frame, t)
+                found = True
+        if not found:
+            ctk.CTkLabel(
+                self.savings_list_frame, text="No savings transactions yet.",
+                font=FONT_MAIN, text_color=COLOR_TEXT_SUB
+            ).pack(pady=20)
+
 
 if __name__ == "__main__":
     app = FinancialTrackerApp()
