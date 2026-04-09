@@ -25,8 +25,8 @@ FONT_BOLD = ("Segoe UI Semibold", 13)
 FONT_HEADER = ("Segoe UI Bold", 28)
 FONT_SUBHEADER = ("Segoe UI Semibold", 17)
 FONT_NUMBERS = ("Segoe UI Bold", 30)
-FONT_SMALL = ("Segoe UI", 11)
-FONT_TINY = ("Segoe UI", 10)
+FONT_SMALL = ("Segoe UI", 13)
+FONT_TINY = ("Segoe UI", 12)
 
 COLOR_BG = "#0A0A0F"
 COLOR_SIDEBAR = "#0E0E14"
@@ -47,8 +47,8 @@ COLOR_WARNING_DIM = "#E5B85A"
 COLOR_SAVINGS = "#A29BFE"
 COLOR_SAVINGS_DIM = "#8B83E0"
 COLOR_TEXT_MAIN = "#F0F0F5"
-COLOR_TEXT_SUB = "#8E8EA0"
-COLOR_TEXT_DIM = "#7A7A92"
+COLOR_TEXT_SUB = "#9898AC"
+COLOR_TEXT_DIM = "#8585A0"
 COLOR_ACCENT_LINE = "#2A2A3A"
 
 
@@ -514,12 +514,12 @@ class FinancialTrackerApp(ctk.CTk):
         bar = ctk.CTkFrame(card, fg_color=accent_color, height=3, corner_radius=2)
         bar.pack(fill="x", padx=16, pady=(14, 0))
 
-        ctk.CTkLabel(card, text=label, font=("Segoe UI Semibold", 11), text_color=COLOR_TEXT_SUB).pack(padx=18, pady=(10, 2), anchor="w")
+        ctk.CTkLabel(card, text=label, font=("Segoe UI Semibold", 12), text_color=COLOR_TEXT_SUB).pack(padx=18, pady=(10, 2), anchor="w")
 
         lbl_main = ctk.CTkLabel(card, text=main_var, font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN)
         lbl_main.pack(padx=18, anchor="w")
 
-        lbl_sub = ctk.CTkLabel(card, text=sub_var, font=FONT_SMALL, text_color=COLOR_TEXT_DIM)
+        lbl_sub = ctk.CTkLabel(card, text=sub_var, font=("Segoe UI", 14), text_color=COLOR_TEXT_SUB)
         lbl_sub.pack(padx=18, pady=(0, 16), anchor="w")
 
         return card, lbl_main, lbl_sub
@@ -530,16 +530,16 @@ class FinancialTrackerApp(ctk.CTk):
         bar = ctk.CTkFrame(card, fg_color=accent_color, height=3, corner_radius=2)
         bar.pack(fill="x", padx=16, pady=(14, 0))
 
-        ctk.CTkLabel(card, text=label, font=("Segoe UI Semibold", 11), text_color=COLOR_TEXT_SUB).pack(padx=18, pady=(10, 4), anchor="w")
+        ctk.CTkLabel(card, text=label, font=("Segoe UI Semibold", 12), text_color=COLOR_TEXT_SUB).pack(padx=18, pady=(10, 4), anchor="w")
 
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(padx=18, pady=(0, 16), fill="x")
 
         left = ctk.CTkFrame(row, fg_color="transparent")
         left.pack(side="left")
-        lbl_usd = ctk.CTkLabel(left, text=usd_var, font=("Segoe UI Bold", 22), text_color=accent_color)
+        lbl_usd = ctk.CTkLabel(left, text=usd_var, font=("Segoe UI Bold", 26), text_color=accent_color)
         lbl_usd.pack(anchor="w")
-        lbl_usd_sub = ctk.CTkLabel(left, text=usd_sub, font=FONT_TINY, text_color=COLOR_TEXT_DIM)
+        lbl_usd_sub = ctk.CTkLabel(left, text=usd_sub, font=("Segoe UI", 14), text_color=COLOR_TEXT_SUB)
         lbl_usd_sub.pack(anchor="w")
 
         sep = ctk.CTkFrame(row, fg_color=COLOR_ACCENT_LINE, width=1)
@@ -547,9 +547,9 @@ class FinancialTrackerApp(ctk.CTk):
 
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="left")
-        lbl_dzd = ctk.CTkLabel(right, text=dzd_var, font=("Segoe UI Bold", 22), text_color=accent_color)
+        lbl_dzd = ctk.CTkLabel(right, text=dzd_var, font=("Segoe UI Bold", 26), text_color=accent_color)
         lbl_dzd.pack(anchor="w")
-        lbl_dzd_sub = ctk.CTkLabel(right, text=dzd_sub, font=FONT_TINY, text_color=COLOR_TEXT_DIM)
+        lbl_dzd_sub = ctk.CTkLabel(right, text=dzd_sub, font=("Segoe UI", 14), text_color=COLOR_TEXT_SUB)
         lbl_dzd_sub.pack(anchor="w")
 
         return card, lbl_usd, lbl_usd_sub, lbl_dzd, lbl_dzd_sub
@@ -594,7 +594,7 @@ class FinancialTrackerApp(ctk.CTk):
         ctk.CTkLabel(nw_frame, text="NET WORTH", font=("Segoe UI Bold", 10), text_color=COLOR_TEXT_DIM).pack(anchor="e")
         self.lbl_header_nw = ctk.CTkLabel(nw_frame, text="...", font=("Segoe UI Bold", 26), text_color=COLOR_TEXT_MAIN)
         self.lbl_header_nw.pack(anchor="e")
-        self.lbl_header_nw_sub = ctk.CTkLabel(nw_frame, text="", font=FONT_SMALL, text_color=COLOR_TEXT_SUB)
+        self.lbl_header_nw_sub = ctk.CTkLabel(nw_frame, text="", font=("Segoe UI", 15), text_color=COLOR_TEXT_SUB)
         self.lbl_header_nw_sub.pack(anchor="e")
 
         # ── Row 1: Income & Expenses (dual currency cards) ──
@@ -1209,8 +1209,8 @@ class FinancialTrackerApp(ctk.CTk):
         # Text
         tf = ctk.CTkFrame(inner, fg_color="transparent")
         tf.pack(side="left", padx=(8, 10), pady=10)
-        ctk.CTkLabel(tf, text=main_txt, font=("Segoe UI Semibold", 13), text_color=COLOR_TEXT_MAIN).pack(anchor="w")
-        ctk.CTkLabel(tf, text=sub_txt, font=FONT_TINY, text_color=COLOR_TEXT_DIM).pack(anchor="w")
+        ctk.CTkLabel(tf, text=main_txt, font=("Segoe UI Semibold", 14), text_color=COLOR_TEXT_MAIN).pack(anchor="w")
+        ctk.CTkLabel(tf, text=sub_txt, font=("Segoe UI", 12), text_color=COLOR_TEXT_SUB).pack(anchor="w")
 
         # Delete button
         if not simple:
@@ -1224,9 +1224,9 @@ class FinancialTrackerApp(ctk.CTk):
         # Amount
         af = ctk.CTkFrame(inner, fg_color="transparent")
         af.pack(side="right", padx=12, pady=10)
-        ctk.CTkLabel(af, text=amt_txt, font=("Segoe UI Bold", 13), text_color=col).pack(anchor="e")
+        ctk.CTkLabel(af, text=amt_txt, font=("Segoe UI Bold", 15), text_color=col).pack(anchor="e")
         if amt_sub_txt:
-            ctk.CTkLabel(af, text=amt_sub_txt, font=FONT_TINY, text_color=COLOR_TEXT_DIM).pack(anchor="e")
+            ctk.CTkLabel(af, text=amt_sub_txt, font=("Segoe UI", 13), text_color=COLOR_TEXT_SUB).pack(anchor="e")
 
     # ================================================================
     # LIST UPDATES
