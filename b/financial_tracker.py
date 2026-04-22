@@ -10,13 +10,11 @@ import traceback
 from psycopg2.extras import Json
 from datetime import datetime
 
-# --- MAC OS .APP FIX ---
 if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w')
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
-# --- Theme ---
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
@@ -46,6 +44,8 @@ COLOR_WARNING = "#FDCB6E"
 COLOR_WARNING_DIM = "#E5B85A"
 COLOR_SAVINGS = "#A29BFE"
 COLOR_SAVINGS_DIM = "#8B83E0"
+COLOR_LOAN = "#FF9F43"
+COLOR_LOAN_DIM = "#E08C3A"
 COLOR_TEXT_MAIN = "#F0F0F5"
 COLOR_TEXT_SUB = "#9898AC"
 COLOR_TEXT_DIM = "#8585A0"
@@ -61,7 +61,6 @@ class FinancialTrackerApp(ctk.CTk):
         self.configure(fg_color=COLOR_BG)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-
         self.db_url = ""
         self.data = {"settings": {"display_rate": 200.0}, "transactions": []}
         self.config_file = os.path.expanduser("~/finance_tracker_db_config.json")
@@ -69,11 +68,10 @@ class FinancialTrackerApp(ctk.CTk):
         self.nav_buttons = {}
         self._db_conn = None
         self._cached_stats = None
-
         self.after(100, self.check_db_connection)
 
     # ================================================================
-    # DB CONNECTION
+    # DB
     # ================================================================
     def get_db_connection(self):
         try:
@@ -125,36 +123,18 @@ class FinancialTrackerApp(ctk.CTk):
         for w in self.winfo_children():
             w.destroy()
         self.grid_columnconfigure(0, weight=1)
-
         outer = ctk.CTkFrame(self, fg_color="transparent")
         outer.grid(row=0, column=0)
-
         card = ctk.CTkFrame(outer, fg_color=COLOR_CARD, corner_radius=24, border_width=1, border_color=COLOR_BORDER)
         card.pack(padx=60, pady=60)
-
-        # Accent bar
-        accent = ctk.CTkFrame(card, fg_color=COLOR_PRIMARY, height=4, corner_radius=2)
-        accent.pack(fill="x", padx=30, pady=(30, 0))
-
+        ctk.CTkFrame(card, fg_color=COLOR_PRIMARY, height=4, corner_radius=2).pack(fill="x", padx=30, pady=(30, 0))
         ctk.CTkLabel(card, text="Connect Database", font=("Segoe UI Bold", 24), text_color=COLOR_TEXT_MAIN).pack(pady=(20, 5))
         ctk.CTkLabel(card, text="Link your Neon PostgreSQL to sync across devices", font=FONT_SMALL, text_color=COLOR_TEXT_SUB).pack(padx=40, pady=(0, 25))
-
-        self.entry_db_url = ctk.CTkEntry(
-            card, width=520, height=50, corner_radius=14,
-            border_width=1, border_color=COLOR_BORDER, fg_color=COLOR_INPUT,
-            text_color="white", placeholder_text="postgresql://user:pass@ep-...neon.tech/neondb",
-            placeholder_text_color=COLOR_TEXT_DIM
-        )
+        self.entry_db_url = ctk.CTkEntry(card, width=520, height=50, corner_radius=14, border_width=1, border_color=COLOR_BORDER, fg_color=COLOR_INPUT, text_color="white", placeholder_text="postgresql://user:pass@ep-...neon.tech/neondb", placeholder_text_color=COLOR_TEXT_DIM)
         self.entry_db_url.pack(padx=40, pady=10)
-
         self.lbl_setup_error = ctk.CTkLabel(card, text="", font=FONT_BOLD, text_color=COLOR_DANGER)
         self.lbl_setup_error.pack(pady=5)
-
-        ctk.CTkButton(
-            card, text="Connect & Sync", width=220, height=48,
-            corner_radius=14, font=FONT_BOLD, fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_DIM, command=self.attempt_connection
-        ).pack(pady=(10, 35))
+        ctk.CTkButton(card, text="Connect & Sync", width=220, height=48, corner_radius=14, font=FONT_BOLD, fg_color=COLOR_PRIMARY, hover_color=COLOR_PRIMARY_DIM, command=self.attempt_connection).pack(pady=(10, 35))
 
     def attempt_connection(self):
         url = self.entry_db_url.get().strip()
@@ -163,10 +143,8 @@ class FinancialTrackerApp(ctk.CTk):
             return
         if "sslmode=require" not in url:
             url += "&sslmode=require" if "?" in url else "?sslmode=require"
-
         self.lbl_setup_error.configure(text="Connecting...", text_color=COLOR_WARNING)
         self.update()
-
         try:
             conn = psycopg2.connect(url)
             with conn:
@@ -190,19 +168,18 @@ class FinancialTrackerApp(ctk.CTk):
                 w.destroy()
             self.grid_columnconfigure(0, weight=0)
             self.grid_columnconfigure(1, weight=1)
-
             self.current_date = datetime.now()
             self.selected_month = self.current_date.month
             self.selected_year = self.current_date.year
             self.data = self.fetch_data_from_db()
 
-            self.sidebar_frame = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=COLOR_SIDEBAR, border_width=0)
+            self.sidebar_frame = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=COLOR_SIDEBAR)
             self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-            self.sidebar_frame.grid_rowconfigure(7, weight=1)
+            self.sidebar_frame.grid_rowconfigure(8, weight=1)
             self.create_sidebar()
 
             self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-            self.main_frame.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
+            self.main_frame.grid(row=0, column=1, sticky="nsew")
             self.main_frame.grid_columnconfigure(0, weight=1)
             self.main_frame.grid_rowconfigure(0, weight=1)
 
@@ -211,6 +188,7 @@ class FinancialTrackerApp(ctk.CTk):
             self.create_transfer_frame()
             self.create_expenses_frame()
             self.create_savings_frame()
+            self.create_lending_frame()
             self.show_frame("dashboard")
         except Exception as e:
             messagebox.showerror("Fatal Error", f"{e}\n\n{traceback.format_exc()}")
@@ -240,10 +218,7 @@ class FinancialTrackerApp(ctk.CTk):
         try:
             conn = self.get_db_connection()
             with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO transactions (id, t_date, t_type, payload) VALUES (%s, %s, %s, %s)",
-                    (t['id'], t['date'], t['type'], Json(t))
-                )
+                cur.execute("INSERT INTO transactions (id, t_date, t_type, payload) VALUES (%s, %s, %s, %s)", (t['id'], t['date'], t['type'], Json(t)))
             conn.commit()
             self.data["transactions"].append(t)
             self._cached_stats = None
@@ -261,13 +236,34 @@ class FinancialTrackerApp(ctk.CTk):
             self.show_error_native(f"Save failed:\n{e}")
             return False
 
+    def update_transaction_in_db(self, t):
+        """Update an existing transaction's payload in the DB."""
+        try:
+            conn = self.get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("UPDATE transactions SET payload = %s WHERE id = %s", (Json(t), t['id']))
+            conn.commit()
+            for i, existing in enumerate(self.data["transactions"]):
+                if existing.get("id") == t["id"]:
+                    self.data["transactions"][i] = t
+                    break
+            self._cached_stats = None
+            self.refresh_ui()
+            return True
+        except Exception as e:
+            try:
+                self.get_db_connection().rollback()
+            except Exception:
+                pass
+            self.show_error_native(f"Update failed:\n{e}")
+            return False
+
     def delete_transaction(self, tid):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Confirm")
         dialog.geometry("340x170")
         dialog.configure(fg_color=COLOR_CARD)
         dialog.attributes('-topmost', True)
-
         ctk.CTkLabel(dialog, text="Delete this transaction?", font=FONT_BOLD, text_color=COLOR_TEXT_MAIN).pack(pady=(25, 5))
         ctk.CTkLabel(dialog, text="This action cannot be undone.", font=FONT_SMALL, text_color=COLOR_TEXT_SUB).pack(pady=(0, 15))
 
@@ -341,16 +337,11 @@ class FinancialTrackerApp(ctk.CTk):
     # SIDEBAR
     # ================================================================
     def create_sidebar(self):
-        # Logo area
         logo_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
         logo_frame.grid(row=0, column=0, padx=25, pady=(40, 10), sticky="w")
-
-        dot = ctk.CTkFrame(logo_frame, width=10, height=10, corner_radius=5, fg_color=COLOR_PRIMARY)
-        dot.pack(side="left", padx=(0, 10))
+        ctk.CTkFrame(logo_frame, width=10, height=10, corner_radius=5, fg_color=COLOR_PRIMARY).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(logo_frame, text="Finance", font=("Segoe UI Bold", 20), text_color=COLOR_TEXT_MAIN).pack(side="left")
-
-        # Divider
-        ctk.CTkFrame(self.sidebar_frame, fg_color=COLOR_ACCENT_LINE, height=1).grid(row=0, column=0, sticky="sew", padx=20, pady=(0, 0))
+        ctk.CTkFrame(self.sidebar_frame, fg_color=COLOR_ACCENT_LINE, height=1).grid(row=0, column=0, sticky="sew", padx=20)
 
         buttons_info = [
             ("⬡  Dashboard", "dashboard"),
@@ -358,8 +349,8 @@ class FinancialTrackerApp(ctk.CTk):
             ("⇄  Transfers", "transfer"),
             ("▼  Expenses", "expenses"),
             ("◈  Savings", "savings"),
+            ("⤴  Lending", "lending"),
         ]
-
         for i, (text, name) in enumerate(buttons_info):
             btn = ctk.CTkButton(
                 self.sidebar_frame, text=text, height=42, corner_radius=12,
@@ -371,42 +362,29 @@ class FinancialTrackerApp(ctk.CTk):
             btn.grid(row=i + 1, column=0, sticky="ew", padx=12, pady=2)
             self.nav_buttons[name] = btn
 
-        # Bottom settings
         settings_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        settings_frame.grid(row=8, column=0, padx=20, pady=(10, 30), sticky="sew")
+        settings_frame.grid(row=9, column=0, padx=20, pady=(10, 30), sticky="sew")
 
-        # Status badge
         status_frame = ctk.CTkFrame(settings_frame, fg_color=COLOR_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
         status_frame.pack(fill="x", pady=(0, 15))
         sf_inner = ctk.CTkFrame(status_frame, fg_color="transparent")
         sf_inner.pack(padx=12, pady=10)
-        dot2 = ctk.CTkFrame(sf_inner, width=8, height=8, corner_radius=4, fg_color=COLOR_SUCCESS)
-        dot2.pack(side="left", padx=(0, 8))
+        ctk.CTkFrame(sf_inner, width=8, height=8, corner_radius=4, fg_color=COLOR_SUCCESS).pack(side="left", padx=(0, 8))
         ctk.CTkLabel(sf_inner, text="Database synced", font=FONT_TINY, text_color=COLOR_SUCCESS).pack(side="left")
 
         ctk.CTkLabel(settings_frame, text="USD → DZD Rate", font=FONT_TINY, text_color=COLOR_TEXT_SUB).pack(anchor="w", pady=(0, 5))
         current_rate = self.data.get("settings", {}).get("display_rate", 200.0)
-        self.entry_display_rate = ctk.CTkEntry(
-            settings_frame, height=36, corner_radius=10, fg_color=COLOR_INPUT,
-            border_width=1, border_color=COLOR_BORDER, text_color="white"
-        )
+        self.entry_display_rate = ctk.CTkEntry(settings_frame, height=36, corner_radius=10, fg_color=COLOR_INPUT, border_width=1, border_color=COLOR_BORDER, text_color="white")
         self.entry_display_rate.insert(0, str(current_rate))
         self.entry_display_rate.pack(fill="x", pady=(0, 8))
-        ctk.CTkButton(
-            settings_frame, text="Update Rate", height=36, corner_radius=10,
-            fg_color=COLOR_INPUT, hover_color=COLOR_HOVER, border_width=1,
-            border_color=COLOR_BORDER, font=FONT_TINY, command=self.update_display_rate
-        ).pack(fill="x")
+        ctk.CTkButton(settings_frame, text="Update Rate", height=36, corner_radius=10, fg_color=COLOR_INPUT, hover_color=COLOR_HOVER, border_width=1, border_color=COLOR_BORDER, font=FONT_TINY, command=self.update_display_rate).pack(fill="x")
 
     def show_frame(self, name):
         for frame in self.frames.values():
             frame.grid_forget()
         self.frames[name].grid(row=0, column=0, sticky="nsew")
-        for btn_name, btn in self.nav_buttons.items():
-            if btn_name == name:
-                btn.configure(fg_color=COLOR_PRIMARY, text_color="white")
-            else:
-                btn.configure(fg_color="transparent", text_color=COLOR_TEXT_SUB)
+        for bn, btn in self.nav_buttons.items():
+            btn.configure(fg_color=COLOR_PRIMARY if bn == name else "transparent", text_color="white" if bn == name else COLOR_TEXT_SUB)
         if name == "dashboard":
             self.current_date = datetime.now()
             self.selected_month = self.current_date.month
@@ -430,13 +408,13 @@ class FinancialTrackerApp(ctk.CTk):
     def calculate_stats(self):
         if self._cached_stats is not None and self._cached_stats.get("_month_key") == self.get_monthly_key():
             return self._cached_stats
-
         target_month = self.get_monthly_key()
         s = {
             "usd_savings": 0.0, "paypal_balance": 0.0, "dzd_cash": 0.0,
             "usd_locked": 0.0, "dzd_locked": 0.0,
             "month_earned_usd": 0.0, "month_earned_dzd": 0.0,
             "month_spent_usd": 0.0, "month_spent_dzd": 0.0,
+            "total_lent_usd": 0.0, "total_lent_dzd": 0.0,
         }
         for t in self.data.get("transactions", []):
             curr = t.get('currency', 'USD')
@@ -486,6 +464,23 @@ class FinancialTrackerApp(ctk.CTk):
                 else:
                     s['dzd_cash'] += base
                     s['dzd_locked'] -= base
+            elif tt == 'loan_out':
+                if t.get('status', 'active') == 'active':
+                    if curr == 'USD':
+                        s['total_lent_usd'] += base
+                    else:
+                        s['total_lent_dzd'] += base
+                # Money leaves your pocket when you lend
+                if curr == 'USD':
+                    s['usd_savings'] -= base
+                else:
+                    s['dzd_cash'] -= base
+            elif tt == 'loan_repaid':
+                # Money comes back when repaid
+                if curr == 'USD':
+                    s['usd_savings'] += base
+                else:
+                    s['dzd_cash'] += base
 
             if td.startswith(target_month):
                 if tt == 'income':
@@ -504,54 +499,37 @@ class FinancialTrackerApp(ctk.CTk):
         return s
 
     # ================================================================
-    # CARD BUILDER HELPERS
+    # CARD BUILDERS
     # ================================================================
     def make_stat_card(self, parent, label, accent_color, main_var, sub_var):
-        """Creates a card with an accent top-bar and returns (main_label, sub_label)."""
         card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16, border_width=1, border_color=COLOR_BORDER)
-
-        # Accent bar at top
-        bar = ctk.CTkFrame(card, fg_color=accent_color, height=3, corner_radius=2)
-        bar.pack(fill="x", padx=16, pady=(14, 0))
-
+        ctk.CTkFrame(card, fg_color=accent_color, height=3, corner_radius=2).pack(fill="x", padx=16, pady=(14, 0))
         ctk.CTkLabel(card, text=label, font=("Segoe UI Semibold", 12), text_color=COLOR_TEXT_SUB).pack(padx=18, pady=(10, 2), anchor="w")
-
         lbl_main = ctk.CTkLabel(card, text=main_var, font=FONT_NUMBERS, text_color=COLOR_TEXT_MAIN)
         lbl_main.pack(padx=18, anchor="w")
-
         lbl_sub = ctk.CTkLabel(card, text=sub_var, font=("Segoe UI", 14), text_color=COLOR_TEXT_SUB)
         lbl_sub.pack(padx=18, pady=(0, 16), anchor="w")
-
         return card, lbl_main, lbl_sub
 
     def make_dual_stat_card(self, parent, label, accent_color, usd_var, usd_sub, dzd_var, dzd_sub):
-        """Card showing both USD and DZD amounts side-by-side."""
         card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16, border_width=1, border_color=COLOR_BORDER)
-        bar = ctk.CTkFrame(card, fg_color=accent_color, height=3, corner_radius=2)
-        bar.pack(fill="x", padx=16, pady=(14, 0))
-
+        ctk.CTkFrame(card, fg_color=accent_color, height=3, corner_radius=2).pack(fill="x", padx=16, pady=(14, 0))
         ctk.CTkLabel(card, text=label, font=("Segoe UI Semibold", 12), text_color=COLOR_TEXT_SUB).pack(padx=18, pady=(10, 4), anchor="w")
-
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(padx=18, pady=(0, 16), fill="x")
-
         left = ctk.CTkFrame(row, fg_color="transparent")
         left.pack(side="left")
         lbl_usd = ctk.CTkLabel(left, text=usd_var, font=("Segoe UI Bold", 26), text_color=accent_color)
         lbl_usd.pack(anchor="w")
         lbl_usd_sub = ctk.CTkLabel(left, text=usd_sub, font=("Segoe UI", 14), text_color=COLOR_TEXT_SUB)
         lbl_usd_sub.pack(anchor="w")
-
-        sep = ctk.CTkFrame(row, fg_color=COLOR_ACCENT_LINE, width=1)
-        sep.pack(side="left", fill="y", padx=20, pady=2)
-
+        ctk.CTkFrame(row, fg_color=COLOR_ACCENT_LINE, width=1).pack(side="left", fill="y", padx=20, pady=2)
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="left")
         lbl_dzd = ctk.CTkLabel(right, text=dzd_var, font=("Segoe UI Bold", 26), text_color=accent_color)
         lbl_dzd.pack(anchor="w")
         lbl_dzd_sub = ctk.CTkLabel(right, text=dzd_sub, font=("Segoe UI", 14), text_color=COLOR_TEXT_SUB)
         lbl_dzd_sub.pack(anchor="w")
-
         return card, lbl_usd, lbl_usd_sub, lbl_dzd, lbl_dzd_sub
 
     # ================================================================
@@ -563,25 +541,20 @@ class FinancialTrackerApp(ctk.CTk):
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(4, weight=1)
 
-        # Scrollable wrapper for content
         content = ctk.CTkFrame(frame, fg_color="transparent")
         content.grid(row=0, column=0, sticky="nsew", padx=30, pady=(25, 0))
         content.grid_columnconfigure(0, weight=1)
 
-        # ── Header: nav + net worth ──
         header = ctk.CTkFrame(content, fg_color="transparent")
         header.pack(fill="x", pady=(0, 22))
-
         nav_wrap = ctk.CTkFrame(header, fg_color="transparent")
         nav_wrap.pack(side="left")
-
         nav = ctk.CTkFrame(nav_wrap, fg_color=COLOR_CARD, corner_radius=12, border_width=1, border_color=COLOR_BORDER)
         nav.pack(side="left")
         ctk.CTkButton(nav, text="‹", width=32, height=36, corner_radius=10, fg_color="transparent", hover_color=COLOR_HOVER, font=("Segoe UI", 18), command=lambda: self.change_time('month', -1)).pack(side="left", padx=2)
         self.lbl_month_selector = ctk.CTkLabel(nav, text="Month", font=("Segoe UI Semibold", 13), width=90, text_color=COLOR_TEXT_MAIN)
         self.lbl_month_selector.pack(side="left")
         ctk.CTkButton(nav, text="›", width=32, height=36, corner_radius=10, fg_color="transparent", hover_color=COLOR_HOVER, font=("Segoe UI", 18), command=lambda: self.change_time('month', 1)).pack(side="left", padx=2)
-
         nav_yr = ctk.CTkFrame(nav_wrap, fg_color=COLOR_CARD, corner_radius=12, border_width=1, border_color=COLOR_BORDER)
         nav_yr.pack(side="left", padx=8)
         ctk.CTkButton(nav_yr, text="‹", width=32, height=36, corner_radius=10, fg_color="transparent", hover_color=COLOR_HOVER, font=("Segoe UI", 18), command=lambda: self.change_time('year', -1)).pack(side="left", padx=2)
@@ -597,54 +570,32 @@ class FinancialTrackerApp(ctk.CTk):
         self.lbl_header_nw_sub = ctk.CTkLabel(nw_frame, text="", font=("Segoe UI", 15), text_color=COLOR_TEXT_SUB)
         self.lbl_header_nw_sub.pack(anchor="e")
 
-        # ── Row 1: Income & Expenses (dual currency cards) ──
         row1 = ctk.CTkFrame(content, fg_color="transparent")
         row1.pack(fill="x", pady=(0, 12))
         row1.grid_columnconfigure((0, 1), weight=1, uniform="r1")
-
-        c_inc, self.lbl_inc_usd, self.lbl_inc_usd_sub, self.lbl_inc_dzd, self.lbl_inc_dzd_sub = \
-            self.make_dual_stat_card(row1, "INCOME THIS MONTH", COLOR_SUCCESS, "$0", "≈ 0 DZD", "0 DZD", "≈ $0")
+        c_inc, self.lbl_inc_usd, self.lbl_inc_usd_sub, self.lbl_inc_dzd, self.lbl_inc_dzd_sub = self.make_dual_stat_card(row1, "INCOME THIS MONTH", COLOR_SUCCESS, "$0", "≈ 0 DZD", "0 DZD", "≈ $0")
         c_inc.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        c_exp, self.lbl_exp_usd, self.lbl_exp_usd_sub, self.lbl_exp_dzd, self.lbl_exp_dzd_sub = \
-            self.make_dual_stat_card(row1, "EXPENSES THIS MONTH", COLOR_DANGER, "$0", "≈ 0 DZD", "0 DZD", "≈ $0")
+        c_exp, self.lbl_exp_usd, self.lbl_exp_usd_sub, self.lbl_exp_dzd, self.lbl_exp_dzd_sub = self.make_dual_stat_card(row1, "EXPENSES THIS MONTH", COLOR_DANGER, "$0", "≈ 0 DZD", "0 DZD", "≈ $0")
         c_exp.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
-        # ── Row 2: Balance cards ──
         row2 = ctk.CTkFrame(content, fg_color="transparent")
         row2.pack(fill="x", pady=(0, 20))
         row2.grid_columnconfigure((0, 1, 2), weight=1, uniform="r2")
-
         c_pp, self.lbl_paypal, self.lbl_paypal_sub = self.make_stat_card(row2, "PAYPAL (PENDING)", COLOR_WARNING, "$0", "≈ 0 DZD")
         c_pp.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
         c_bk, self.lbl_usd_savings, self.lbl_usd_savings_sub = self.make_stat_card(row2, "BANK (AVAILABLE)", COLOR_PRIMARY, "$0", "≈ 0 DZD")
         c_bk.grid(row=0, column=1, sticky="ew", padx=6)
-
         c_lc, self.lbl_dzd_cash, self.lbl_dzd_cash_sub = self.make_stat_card(row2, "LOCAL CASH", COLOR_TEXT_MAIN, "0 DZD", "≈ $0")
         c_lc.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
-        # ── Filter row ──
         filter_row = ctk.CTkFrame(content, fg_color="transparent")
         filter_row.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(filter_row, text="Transactions", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).pack(side="left")
-
-        self.dash_filter_sort = ctk.CTkOptionMenu(
-            filter_row, values=["Newest First", "Oldest First", "Highest Amount", "Lowest Amount"],
-            fg_color=COLOR_INPUT, button_color=COLOR_INPUT, button_hover_color=COLOR_HOVER,
-            corner_radius=10, height=32, font=FONT_TINY,
-            command=lambda _: self.update_dashboard_history()
-        )
+        self.dash_filter_sort = ctk.CTkOptionMenu(filter_row, values=["Newest First", "Oldest First", "Highest Amount", "Lowest Amount"], fg_color=COLOR_INPUT, button_color=COLOR_INPUT, button_hover_color=COLOR_HOVER, corner_radius=10, height=32, font=FONT_TINY, command=lambda _: self.update_dashboard_history())
         self.dash_filter_sort.pack(side="right", padx=(8, 0))
-        self.dash_filter_type = ctk.CTkOptionMenu(
-            filter_row, values=["All Types", "Income", "Expense", "Transfer", "Savings"],
-            fg_color=COLOR_INPUT, button_color=COLOR_INPUT, button_hover_color=COLOR_HOVER,
-            corner_radius=10, height=32, font=FONT_TINY,
-            command=lambda _: self.update_dashboard_history()
-        )
+        self.dash_filter_type = ctk.CTkOptionMenu(filter_row, values=["All Types", "Income", "Expense", "Transfer", "Savings", "Loan"], fg_color=COLOR_INPUT, button_color=COLOR_INPUT, button_hover_color=COLOR_HOVER, corner_radius=10, height=32, font=FONT_TINY, command=lambda _: self.update_dashboard_history())
         self.dash_filter_type.pack(side="right")
 
-        # ── Scrollable list ──
         self.dashboard_history_frame = ctk.CTkScrollableFrame(frame, fg_color="transparent", scrollbar_button_color=COLOR_BORDER, scrollbar_button_hover_color=COLOR_TEXT_SUB)
         self.dashboard_history_frame.grid(row=4, column=0, sticky="nsew", padx=30, pady=(0, 20))
 
@@ -654,7 +605,6 @@ class FinancialTrackerApp(ctk.CTk):
         target = self.get_monthly_key()
         f_type = self.dash_filter_type.get()
         f_sort = self.dash_filter_sort.get()
-
         filtered = []
         for t in self.data["transactions"]:
             td = str(t.get('date', ''))
@@ -665,7 +615,8 @@ class FinancialTrackerApp(ctk.CTk):
                      (f_type == "Income" and tv == 'income') or
                      (f_type == "Expense" and tv == 'expense') or
                      (f_type == "Transfer" and 'transfer' in tv) or
-                     (f_type == "Savings" and 'savings' in tv))
+                     (f_type == "Savings" and 'savings' in tv) or
+                     (f_type == "Loan" and tv in ('loan_out', 'loan_repaid')))
             if match:
                 filtered.append(t)
 
@@ -691,60 +642,57 @@ class FinancialTrackerApp(ctk.CTk):
                 self.create_list_row(self.dashboard_history_frame, t, simple=True)
 
     # ================================================================
-    # REFRESH UI — all equivalents shown
+    # REFRESH
     # ================================================================
     def refresh_ui(self):
         try:
             st = self.calculate_stats()
             dr = self.get_disp_rate()
 
-            # PayPal
             self.lbl_paypal.configure(text=f"${st['paypal_balance']:,.2f}")
             self.lbl_paypal_sub.configure(text=f"≈ {st['paypal_balance'] * dr:,.0f} DZD")
-
-            # Bank
             self.lbl_usd_savings.configure(text=f"${st['usd_savings']:,.2f}")
             self.lbl_usd_savings_sub.configure(text=f"≈ {st['usd_savings'] * dr:,.0f} DZD")
-
-            # Local Cash — FIX: now shows USD equivalent
             self.lbl_dzd_cash.configure(text=f"{st['dzd_cash']:,.2f} DZD")
             self.lbl_dzd_cash_sub.configure(text=f"≈ ${st['dzd_cash'] / dr:,.2f}")
 
-            # Income this month — FIX: shows both currencies with equivalents
             self.lbl_inc_usd.configure(text=f"+ ${st['month_earned_usd']:,.2f}")
             self.lbl_inc_usd_sub.configure(text=f"≈ {st['month_earned_usd'] * dr:,.0f} DZD")
             self.lbl_inc_dzd.configure(text=f"+ {st['month_earned_dzd']:,.0f} DZD")
             self.lbl_inc_dzd_sub.configure(text=f"≈ ${st['month_earned_dzd'] / dr:,.2f}" if dr > 0 else "")
 
-            # Expenses this month — FIX: shows both with equivalents
             self.lbl_exp_usd.configure(text=f"${st['month_spent_usd']:,.2f}")
             self.lbl_exp_usd_sub.configure(text=f"≈ {st['month_spent_usd'] * dr:,.0f} DZD")
             self.lbl_exp_dzd.configure(text=f"{st['month_spent_dzd']:,.0f} DZD")
             self.lbl_exp_dzd_sub.configure(text=f"≈ ${st['month_spent_dzd'] / dr:,.2f}" if dr > 0 else "")
 
-            # Net Worth
             total_usd = st['usd_savings'] + st['paypal_balance'] + st['usd_locked']
             total_dzd = st['dzd_cash'] + st['dzd_locked']
             nw_usd = total_usd + (total_dzd / dr)
             nw_dzd = total_dzd + (total_usd * dr)
             self.lbl_header_nw.configure(text=f"${nw_usd:,.2f}")
             self.lbl_header_nw_sub.configure(text=f"≈ {nw_dzd:,.0f} DZD")
-
             self.lbl_month_selector.configure(text=datetime(self.selected_year, self.selected_month, 1).strftime('%B'))
             self.lbl_year_selector.configure(text=str(self.selected_year))
 
-            # Savings vault
             if "savings" in self.frames:
                 self.lbl_vault_usd.configure(text=f"${st['usd_locked']:,.2f}")
                 self.lbl_vault_usd_sub.configure(text=f"≈ {st['usd_locked'] * dr:,.0f} DZD")
                 self.lbl_vault_dzd.configure(text=f"{st['dzd_locked']:,.2f} DZD")
                 self.lbl_vault_dzd_sub.configure(text=f"≈ ${st['dzd_locked'] / dr:,.2f}")
 
+            if "lending" in self.frames:
+                self.lbl_lent_usd.configure(text=f"${st['total_lent_usd']:,.2f}")
+                self.lbl_lent_usd_sub.configure(text=f"≈ {st['total_lent_usd'] * dr:,.0f} DZD")
+                self.lbl_lent_dzd.configure(text=f"{st['total_lent_dzd']:,.2f} DZD")
+                self.lbl_lent_dzd_sub.configure(text=f"≈ ${st['total_lent_dzd'] / dr:,.2f}")
+
             self.update_income_list()
             self.update_expense_list()
             self.update_transfer_list()
             self.update_savings_list()
             self.update_dashboard_history()
+            self.update_lending_list()
         except Exception as e:
             messagebox.showerror("Refresh Error", f"{e}\n\n{traceback.format_exc()}")
 
@@ -784,12 +732,11 @@ class FinancialTrackerApp(ctk.CTk):
         return inner
 
     def create_input(self, p, ph):
-        return ctk.CTkEntry(
-            p, height=44, corner_radius=12, border_width=1,
-            border_color=COLOR_BORDER, fg_color=COLOR_INPUT,
-            text_color="white", placeholder_text=ph,
-            placeholder_text_color=COLOR_TEXT_DIM
-        )
+        return ctk.CTkEntry(p, height=44, corner_radius=12, border_width=1, border_color=COLOR_BORDER, fg_color=COLOR_INPUT, text_color="white", placeholder_text=ph, placeholder_text_color=COLOR_TEXT_DIM)
+
+    def create_textbox(self, p, ph):
+        tb = ctk.CTkTextbox(p, height=80, corner_radius=12, border_width=1, border_color=COLOR_BORDER, fg_color=COLOR_INPUT, text_color="white", font=FONT_MAIN)
+        return tb
 
     def on_income_curr_change(self, choice):
         if choice == "DZD (Cash)":
@@ -810,44 +757,21 @@ class FinancialTrackerApp(ctk.CTk):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.frames["income"] = f
         form = self.create_form_container(f, "Add Income")
-
         self.entry_inc_name = self.create_input(form, "Source Name")
         self.entry_inc_name.grid(row=0, column=0, padx=(0, 6), pady=6, sticky="ew")
         self.entry_inc_amount = self.create_input(form, "Gross Amount")
         self.entry_inc_amount.grid(row=0, column=1, padx=(6, 0), pady=6, sticky="ew")
-
-        self.combo_inc_curr = ctk.CTkComboBox(
-            form, height=44, corner_radius=12, fg_color=COLOR_INPUT, border_width=1,
-            border_color=COLOR_BORDER, values=["USD (Online)", "DZD (Cash)"],
-            command=self.on_income_curr_change
-        )
+        self.combo_inc_curr = ctk.CTkComboBox(form, height=44, corner_radius=12, fg_color=COLOR_INPUT, border_width=1, border_color=COLOR_BORDER, values=["USD (Online)", "DZD (Cash)"], command=self.on_income_curr_change)
         self.combo_inc_curr.grid(row=1, column=0, columnspan=2, pady=6, sticky="ew")
-
-        self.combo_fee_type = ctk.CTkComboBox(
-            form, height=44, corner_radius=12, border_width=1,
-            border_color=COLOR_BORDER, fg_color=COLOR_INPUT,
-            values=["No Fee", "Upwork (10%)", "Transaction Fee (Manual)"],
-            command=lambda c: self.entry_fee_val.configure(state="normal" if "Manual" in c else "disabled")
-        )
+        self.combo_fee_type = ctk.CTkComboBox(form, height=44, corner_radius=12, border_width=1, border_color=COLOR_BORDER, fg_color=COLOR_INPUT, values=["No Fee", "Upwork (10%)", "Transaction Fee (Manual)"], command=lambda c: self.entry_fee_val.configure(state="normal" if "Manual" in c else "disabled"))
         self.combo_fee_type.grid(row=2, column=0, padx=(0, 6), pady=6, sticky="ew")
         self.entry_fee_val = self.create_input(form, "Fee Amount ($)")
         self.entry_fee_val.grid(row=2, column=1, padx=(6, 0), pady=6, sticky="ew")
         self.entry_fee_val.configure(state="disabled")
-
         self.chk_paypal_var = ctk.StringVar(value="on")
-        self.chk_paypal = ctk.CTkCheckBox(
-            form, text="Add to PayPal Balance", variable=self.chk_paypal_var,
-            onvalue="on", offvalue="off", font=FONT_MAIN, fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_DIM, border_color=COLOR_BORDER
-        )
+        self.chk_paypal = ctk.CTkCheckBox(form, text="Add to PayPal Balance", variable=self.chk_paypal_var, onvalue="on", offvalue="off", font=FONT_MAIN, fg_color=COLOR_PRIMARY, hover_color=COLOR_PRIMARY_DIM, border_color=COLOR_BORDER)
         self.chk_paypal.grid(row=3, column=0, columnspan=2, pady=12, sticky="w")
-
-        ctk.CTkButton(
-            form, text="Add Income", height=46, corner_radius=12,
-            fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_DIM,
-            font=FONT_BOLD, command=self.add_income
-        ).grid(row=4, column=0, columnspan=2, pady=(8, 0), sticky="ew")
-
+        ctk.CTkButton(form, text="Add Income", height=46, corner_radius=12, fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_DIM, font=FONT_BOLD, command=self.add_income).grid(row=4, column=0, columnspan=2, pady=(8, 0), sticky="ew")
         ctk.CTkLabel(f, text="History", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).grid(row=2, column=0, sticky="w", padx=30, pady=(20, 8))
         self.income_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent", scrollbar_button_color=COLOR_BORDER)
         self.income_list_frame.grid(row=3, column=0, sticky="nsew", padx=30, pady=(0, 20))
@@ -863,19 +787,11 @@ class FinancialTrackerApp(ctk.CTk):
     def create_transfer_frame(self):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.frames["transfer"] = f
-
         hdr = ctk.CTkFrame(f, fg_color="transparent")
         hdr.pack(fill="x", padx=30, pady=(25, 15))
         ctk.CTkLabel(hdr, text="Transfers", font=FONT_HEADER, text_color=COLOR_TEXT_MAIN).pack(anchor="w")
-
-        tv = ctk.CTkTabview(
-            f, fg_color=COLOR_CARD, segmented_button_fg_color=COLOR_INPUT,
-            segmented_button_selected_color=COLOR_PRIMARY,
-            segmented_button_unselected_color=COLOR_INPUT,
-            corner_radius=18, border_width=1, border_color=COLOR_BORDER
-        )
+        tv = ctk.CTkTabview(f, fg_color=COLOR_CARD, segmented_button_fg_color=COLOR_INPUT, segmented_button_selected_color=COLOR_PRIMARY, segmented_button_unselected_color=COLOR_INPUT, corner_radius=18, border_width=1, border_color=COLOR_BORDER)
         tv.pack(fill="x", padx=30)
-
         t1 = tv.add("PayPal → Bank")
         t2 = tv.add("Sell USD → DZD")
 
@@ -909,7 +825,6 @@ class FinancialTrackerApp(ctk.CTk):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.frames["expenses"] = f
         form = self.create_form_container(f, "Record Expense")
-
         self.entry_exp_desc = self.create_input(form, "Description")
         self.entry_exp_desc.grid(row=0, column=0, padx=(0, 6), pady=6, sticky="ew")
         self.entry_exp_amount = self.create_input(form, "Amount")
@@ -919,7 +834,6 @@ class FinancialTrackerApp(ctk.CTk):
         self.combo_exp_curr = ctk.CTkComboBox(form, height=44, corner_radius=12, fg_color=COLOR_INPUT, border_width=1, border_color=COLOR_BORDER, values=["DZD (Cash)", "USD (Online)"])
         self.combo_exp_curr.grid(row=1, column=1, padx=(6, 0), pady=6, sticky="ew")
         ctk.CTkButton(form, text="Record Expense", height=46, corner_radius=12, fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_DIM, font=FONT_BOLD, command=self.add_expense).grid(row=2, column=0, columnspan=2, pady=(12, 0), sticky="ew")
-
         ctk.CTkLabel(f, text="Recent", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).grid(row=2, column=0, sticky="w", padx=30, pady=(20, 8))
         self.expense_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent", scrollbar_button_color=COLOR_BORDER)
         self.expense_list_frame.grid(row=3, column=0, sticky="nsew", padx=30, pady=(0, 20))
@@ -931,7 +845,7 @@ class FinancialTrackerApp(ctk.CTk):
         f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.frames["savings"] = f
         f.grid_columnconfigure((0, 1), weight=1)
-        f.grid_rowconfigure(3, weight=1)
+        f.grid_rowconfigure(4, weight=1)
 
         hdr = ctk.CTkFrame(f, fg_color="transparent")
         hdr.grid(row=0, column=0, columnspan=2, sticky="w", padx=30, pady=(25, 15))
@@ -940,10 +854,8 @@ class FinancialTrackerApp(ctk.CTk):
         row0 = ctk.CTkFrame(f, fg_color="transparent")
         row0.grid(row=1, column=0, columnspan=2, sticky="ew", padx=30, pady=(0, 15))
         row0.grid_columnconfigure((0, 1), weight=1, uniform="sv")
-
         c1, self.lbl_vault_usd, self.lbl_vault_usd_sub = self.make_stat_card(row0, "USD VAULT (LOCKED)", COLOR_SAVINGS, "$0.00", "≈ 0 DZD")
         c1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
         c2, self.lbl_vault_dzd, self.lbl_vault_dzd_sub = self.make_stat_card(row0, "DZD VAULT (LOCKED)", COLOR_SAVINGS, "0 DZD", "≈ $0")
         c2.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
@@ -952,7 +864,6 @@ class FinancialTrackerApp(ctk.CTk):
         form = ctk.CTkFrame(form_card, fg_color="transparent")
         form.pack(fill="x", padx=24, pady=20)
         form.grid_columnconfigure((0, 1), weight=1)
-
         self.combo_sav_action = ctk.CTkComboBox(form, height=44, corner_radius=12, fg_color=COLOR_INPUT, border_width=1, border_color=COLOR_BORDER, values=["Lock into Savings", "Withdraw to Available"])
         self.combo_sav_action.grid(row=0, column=0, padx=(0, 6), pady=6, sticky="ew")
         self.combo_sav_curr = ctk.CTkComboBox(form, height=44, corner_radius=12, fg_color=COLOR_INPUT, border_width=1, border_color=COLOR_BORDER, values=["USD", "DZD"])
@@ -961,9 +872,313 @@ class FinancialTrackerApp(ctk.CTk):
         self.entry_sav_amount.grid(row=1, column=0, columnspan=2, pady=6, sticky="ew")
         ctk.CTkButton(form, text="Confirm", height=46, corner_radius=12, fg_color=COLOR_SAVINGS, hover_color=COLOR_SAVINGS_DIM, font=FONT_BOLD, command=self.manage_savings).grid(row=2, column=0, columnspan=2, pady=(8, 0), sticky="ew")
 
-        ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).grid(row=2, column=0, columnspan=2, sticky="w", padx=30, pady=(20, 8))
+        ctk.CTkLabel(f, text="Savings History", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).grid(row=3, column=0, columnspan=2, sticky="w", padx=30, pady=(20, 8))
         self.savings_list_frame = ctk.CTkScrollableFrame(f, fg_color="transparent", scrollbar_button_color=COLOR_BORDER)
-        self.savings_list_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=30, pady=(0, 20))
+        self.savings_list_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=30, pady=(0, 20))
+
+    # ================================================================
+    # LENDING FRAME
+    # ================================================================
+    def create_lending_frame(self):
+        f = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.frames["lending"] = f
+        f.grid_columnconfigure(0, weight=1)
+        f.grid_rowconfigure(4, weight=1)
+
+        # Header
+        hdr = ctk.CTkFrame(f, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="w", padx=30, pady=(25, 15))
+        ctk.CTkLabel(hdr, text="Lending Tracker", font=FONT_HEADER, text_color=COLOR_TEXT_MAIN).pack(anchor="w")
+        ctk.CTkLabel(hdr, text="Track money you've lent out and mark repayments", font=FONT_SMALL, text_color=COLOR_TEXT_SUB).pack(anchor="w", pady=(2, 0))
+
+        # Summary cards
+        summary_row = ctk.CTkFrame(f, fg_color="transparent")
+        summary_row.grid(row=1, column=0, sticky="ew", padx=30, pady=(0, 15))
+        summary_row.grid_columnconfigure((0, 1), weight=1, uniform="ln")
+
+        c_usd, self.lbl_lent_usd, self.lbl_lent_usd_sub = self.make_stat_card(summary_row, "OUTSTANDING USD", COLOR_LOAN, "$0.00", "≈ 0 DZD")
+        c_usd.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        c_dzd, self.lbl_lent_dzd, self.lbl_lent_dzd_sub = self.make_stat_card(summary_row, "OUTSTANDING DZD", COLOR_LOAN, "0 DZD", "≈ $0")
+        c_dzd.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        # Form card
+        form_card = ctk.CTkFrame(f, fg_color=COLOR_CARD, corner_radius=18, border_width=1, border_color=COLOR_BORDER)
+        form_card.grid(row=2, column=0, sticky="ew", padx=30, pady=(0, 10))
+
+        form = ctk.CTkFrame(form_card, fg_color="transparent")
+        form.pack(fill="x", padx=24, pady=24)
+        form.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(form, text="Record a Loan", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        self.entry_loan_who = self.create_input(form, "Who are you lending to?")
+        self.entry_loan_who.grid(row=1, column=0, padx=(0, 6), pady=6, sticky="ew")
+
+        self.entry_loan_amount = self.create_input(form, "Amount")
+        self.entry_loan_amount.grid(row=1, column=1, padx=(6, 0), pady=6, sticky="ew")
+
+        self.combo_loan_curr = ctk.CTkComboBox(
+            form, height=44, corner_radius=12, fg_color=COLOR_INPUT,
+            border_width=1, border_color=COLOR_BORDER,
+            values=["USD", "DZD"]
+        )
+        self.combo_loan_curr.grid(row=2, column=0, columnspan=2, pady=6, sticky="ew")
+
+        ctk.CTkLabel(form, text="Notes (optional — when, how, context)", font=FONT_TINY, text_color=COLOR_TEXT_SUB).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 2))
+
+        self.txt_loan_notes = self.create_textbox(form, "")
+        self.txt_loan_notes.grid(row=4, column=0, columnspan=2, pady=(0, 6), sticky="ew")
+
+        ctk.CTkButton(
+            form, text="Record Loan", height=46, corner_radius=12,
+            fg_color=COLOR_LOAN, hover_color=COLOR_LOAN_DIM,
+            font=FONT_BOLD, text_color="#000", command=self.add_loan
+        ).grid(row=5, column=0, columnspan=2, pady=(8, 0), sticky="ew")
+
+        # Active loans header + filter
+        list_header = ctk.CTkFrame(f, fg_color="transparent")
+        list_header.grid(row=3, column=0, sticky="ew", padx=30, pady=(20, 8))
+        ctk.CTkLabel(list_header, text="Loans", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).pack(side="left")
+
+        self.combo_loan_filter = ctk.CTkOptionMenu(
+            list_header, values=["Active", "Repaid", "All"],
+            fg_color=COLOR_INPUT, button_color=COLOR_INPUT,
+            button_hover_color=COLOR_HOVER, corner_radius=10,
+            height=32, font=FONT_TINY,
+            command=lambda _: self.update_lending_list()
+        )
+        self.combo_loan_filter.pack(side="right")
+
+        # Loan list
+        self.lending_list_frame = ctk.CTkScrollableFrame(
+            f, fg_color="transparent", scrollbar_button_color=COLOR_BORDER
+        )
+        self.lending_list_frame.grid(row=4, column=0, sticky="nsew", padx=30, pady=(0, 20))
+
+    # ================================================================
+    # LENDING ACTIONS
+    # ================================================================
+    def add_loan(self):
+        who = self.entry_loan_who.get().strip()
+        if not who:
+            self.show_error_native("Enter who you're lending to.")
+            return
+        try:
+            amt = float(self.entry_loan_amount.get())
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            self.show_error_native("Enter a valid positive amount.")
+            return
+
+        curr = self.combo_loan_curr.get()
+        notes = self.txt_loan_notes.get("1.0", "end-1c").strip()
+
+        # Check balance
+        self._cached_stats = None
+        s = self.calculate_stats()
+        if curr == "USD" and s['usd_savings'] < amt:
+            self.show_error_native(f"Insufficient Bank USD.\nAvailable: ${s['usd_savings']:,.2f}")
+            return
+        if curr == "DZD" and s['dzd_cash'] < amt:
+            self.show_error_native(f"Insufficient DZD cash.\nAvailable: {s['dzd_cash']:,.2f} DZD")
+            return
+
+        t = {
+            "id": str(uuid.uuid4()),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "loan_out",
+            "borrower": who,
+            "amount": amt,
+            "currency": curr,
+            "notes": notes,
+            "status": "active",
+        }
+        if self.add_transaction_to_db(t):
+            self.entry_loan_who.delete(0, 'end')
+            self.entry_loan_amount.delete(0, 'end')
+            self.txt_loan_notes.delete("1.0", "end")
+            self.show_success_native(f"Loan to {who} recorded.")
+
+    def mark_loan_repaid(self, loan_t):
+        """Mark an active loan as repaid — creates a loan_repaid transaction and updates the original."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Confirm Repayment")
+        dialog.geometry("400x220")
+        dialog.configure(fg_color=COLOR_CARD)
+        dialog.attributes('-topmost', True)
+
+        dr = self.get_disp_rate()
+        amt = loan_t.get('amount', 0)
+        curr = loan_t.get('currency', 'USD')
+        who = loan_t.get('borrower', '?')
+
+        if curr == "USD":
+            amt_str = f"${amt:,.2f} (≈ {amt * dr:,.0f} DZD)"
+        else:
+            amt_str = f"{amt:,.2f} DZD (≈ ${amt / dr:,.2f})"
+
+        ctk.CTkLabel(dialog, text="Mark as Repaid?", font=("Segoe UI Bold", 18), text_color=COLOR_TEXT_MAIN).pack(pady=(20, 5))
+        ctk.CTkLabel(dialog, text=f"{who} owes you {amt_str}", font=FONT_MAIN, text_color=COLOR_TEXT_SUB, wraplength=350).pack(pady=(0, 5))
+        ctk.CTkLabel(dialog, text="This will return the funds to your available balance.", font=FONT_TINY, text_color=COLOR_TEXT_DIM).pack(pady=(0, 15))
+
+        def confirm():
+            dialog.destroy()
+            # Create a repaid transaction
+            repaid_t = {
+                "id": str(uuid.uuid4()),
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "type": "loan_repaid",
+                "borrower": who,
+                "amount": amt,
+                "currency": curr,
+                "original_loan_id": loan_t['id'],
+                "notes": f"Repayment from {who}",
+            }
+            if self.add_transaction_to_db(repaid_t):
+                # Update the original loan status
+                updated_loan = dict(loan_t)
+                updated_loan['status'] = 'repaid'
+                updated_loan['repaid_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.update_transaction_in_db(updated_loan)
+                self.show_success_native(f"{who} marked as repaid.")
+
+        bf = ctk.CTkFrame(dialog, fg_color="transparent")
+        bf.pack(pady=10)
+        ctk.CTkButton(bf, text="Cancel", width=120, height=40, corner_radius=12, fg_color=COLOR_INPUT, hover_color=COLOR_HOVER, command=dialog.destroy).pack(side="left", padx=8)
+        ctk.CTkButton(bf, text="Confirm Repaid", width=140, height=40, corner_radius=12, fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_DIM, font=FONT_BOLD, command=confirm).pack(side="right", padx=8)
+
+    def update_lending_list(self):
+        if not hasattr(self, 'lending_list_frame'):
+            return
+        for w in self.lending_list_frame.winfo_children():
+            w.destroy()
+
+        filter_val = self.combo_loan_filter.get()
+        dr = self.get_disp_rate()
+
+        # Gather all loan_out transactions
+        loans = [t for t in self.data.get("transactions", []) if t.get('type') == 'loan_out']
+
+        # Filter
+        if filter_val == "Active":
+            loans = [l for l in loans if l.get('status', 'active') == 'active']
+        elif filter_val == "Repaid":
+            loans = [l for l in loans if l.get('status') == 'repaid']
+
+        loans.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+
+        if not loans:
+            msg = "No active loans." if filter_val == "Active" else ("No repaid loans." if filter_val == "Repaid" else "No loans recorded yet.")
+            ctk.CTkLabel(self.lending_list_frame, text=msg, font=FONT_MAIN, text_color=COLOR_TEXT_DIM).pack(pady=30)
+            return
+
+        # Group by borrower for active loans
+        if filter_val == "Active":
+            borrower_totals = {}
+            for l in loans:
+                b = l.get('borrower', '?')
+                c = l.get('currency', 'USD')
+                a = l.get('amount', 0)
+                key = b
+                if key not in borrower_totals:
+                    borrower_totals[key] = {"usd": 0.0, "dzd": 0.0}
+                if c == "USD":
+                    borrower_totals[key]["usd"] += a
+                else:
+                    borrower_totals[key]["dzd"] += a
+
+            # Show borrower summary badges
+            if borrower_totals:
+                summary_frame = ctk.CTkFrame(self.lending_list_frame, fg_color="transparent")
+                summary_frame.pack(fill="x", pady=(0, 12))
+
+                for borrower, totals in borrower_totals.items():
+                    badge = ctk.CTkFrame(summary_frame, fg_color=COLOR_CARD, corner_radius=10, border_width=1, border_color=COLOR_LOAN)
+                    badge.pack(side="left", padx=(0, 8), pady=2)
+                    inner = ctk.CTkFrame(badge, fg_color="transparent")
+                    inner.pack(padx=12, pady=8)
+                    parts = []
+                    if totals["usd"] > 0:
+                        parts.append(f"${totals['usd']:,.2f}")
+                    if totals["dzd"] > 0:
+                        parts.append(f"{totals['dzd']:,.0f} DZD")
+                    ctk.CTkLabel(inner, text=borrower, font=("Segoe UI Bold", 12), text_color=COLOR_LOAN).pack(side="left", padx=(0, 8))
+                    ctk.CTkLabel(inner, text=" + ".join(parts), font=("Segoe UI", 12), text_color=COLOR_TEXT_MAIN).pack(side="left")
+
+        # Individual loan rows
+        for loan in loans:
+            self.create_loan_row(self.lending_list_frame, loan)
+
+    def create_loan_row(self, parent, t):
+        """Render a single loan row with status, details, and repaid button."""
+        is_active = t.get('status', 'active') == 'active'
+        dr = self.get_disp_rate()
+        amt = t.get('amount', 0)
+        curr = t.get('currency', 'USD')
+        who = t.get('borrower', '?')
+        notes = t.get('notes', '')
+        t_date = str(t.get('date', ''))[:10]
+        repaid_date = str(t.get('repaid_date', ''))[:10] if t.get('repaid_date') else None
+
+        outer = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=12, border_width=1, border_color=COLOR_LOAN if is_active else COLOR_BORDER)
+        outer.pack(fill="x", pady=4)
+
+        inner = ctk.CTkFrame(outer, fg_color="transparent")
+        inner.pack(fill="x", padx=0, pady=0)
+
+        # Status dot
+        dot_frame = ctk.CTkFrame(inner, fg_color="transparent", width=20)
+        dot_frame.pack(side="left", padx=(14, 0), pady=14)
+        dot_color = COLOR_LOAN if is_active else COLOR_SUCCESS
+        ctk.CTkFrame(dot_frame, width=10, height=10, corner_radius=5, fg_color=dot_color).pack()
+
+        # Text block
+        tf = ctk.CTkFrame(inner, fg_color="transparent")
+        tf.pack(side="left", padx=(10, 10), pady=12, fill="x", expand=True)
+
+        # Name + status badge
+        name_row = ctk.CTkFrame(tf, fg_color="transparent")
+        name_row.pack(anchor="w")
+        ctk.CTkLabel(name_row, text=who, font=("Segoe UI Bold", 15), text_color=COLOR_TEXT_MAIN).pack(side="left")
+
+        if is_active:
+            badge = ctk.CTkFrame(name_row, fg_color=COLOR_LOAN, corner_radius=6)
+            badge.pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(badge, text="ACTIVE", font=("Segoe UI Bold", 9), text_color="#000").pack(padx=8, pady=2)
+        else:
+            badge = ctk.CTkFrame(name_row, fg_color=COLOR_SUCCESS, corner_radius=6)
+            badge.pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(badge, text="REPAID", font=("Segoe UI Bold", 9), text_color="#000").pack(padx=8, pady=2)
+
+        # Date line
+        date_txt = f"Lent on {t_date}"
+        if repaid_date:
+            date_txt += f"  •  Repaid {repaid_date}"
+        ctk.CTkLabel(tf, text=date_txt, font=("Segoe UI", 12), text_color=COLOR_TEXT_SUB).pack(anchor="w")
+
+        # Notes
+        if notes:
+            ctk.CTkLabel(tf, text=notes, font=("Segoe UI", 12), text_color=COLOR_TEXT_DIM, wraplength=500, justify="left").pack(anchor="w", pady=(4, 0))
+
+        # Right side: amount + actions
+        right = ctk.CTkFrame(inner, fg_color="transparent")
+        right.pack(side="right", padx=14, pady=12)
+
+        if curr == "USD":
+            ctk.CTkLabel(right, text=f"${amt:,.2f}", font=("Segoe UI Bold", 16), text_color=COLOR_LOAN if is_active else COLOR_TEXT_SUB).pack(anchor="e")
+            ctk.CTkLabel(right, text=f"≈ {amt * dr:,.0f} DZD", font=("Segoe UI", 13), text_color=COLOR_TEXT_SUB).pack(anchor="e")
+        else:
+            ctk.CTkLabel(right, text=f"{amt:,.2f} DZD", font=("Segoe UI Bold", 16), text_color=COLOR_LOAN if is_active else COLOR_TEXT_SUB).pack(anchor="e")
+            ctk.CTkLabel(right, text=f"≈ ${amt / dr:,.2f}", font=("Segoe UI", 13), text_color=COLOR_TEXT_SUB).pack(anchor="e")
+
+        if is_active:
+            ctk.CTkButton(
+                right, text="✓ Mark Repaid", width=120, height=32, corner_radius=10,
+                fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_DIM,
+                font=("Segoe UI Semibold", 11), text_color="#000",
+                command=lambda loan=t: self.mark_loan_repaid(loan)
+            ).pack(anchor="e", pady=(8, 0))
 
     # ================================================================
     # ACTIONS
@@ -980,7 +1195,6 @@ class FinancialTrackerApp(ctk.CTk):
         except ValueError:
             self.show_error_native("Enter a valid positive amount.")
             return
-
         curr = "DZD" if "DZD" in self.combo_inc_curr.get() else "USD"
         if curr == "DZD":
             fee, fee_type, to_paypal = 0.0, "No Fee", False
@@ -1002,7 +1216,6 @@ class FinancialTrackerApp(ctk.CTk):
         if fee > val:
             self.show_error_native("Fee exceeds income.")
             return
-
         t = {"id": str(uuid.uuid4()), "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "income", "category": name, "amount": val, "currency": curr, "fee_type": fee_type, "fee_amount": fee, "net_amount": val - fee, "to_paypal": to_paypal}
         if self.add_transaction_to_db(t):
             self.entry_inc_name.delete(0, 'end')
@@ -1114,7 +1327,7 @@ class FinancialTrackerApp(ctk.CTk):
             self.show_success_native("Vault updated.")
 
     # ================================================================
-    # LIST ROW — modern with colored left accent
+    # LIST ROW (general transactions)
     # ================================================================
     def create_list_row(self, parent, t, simple=False):
         t_type = t.get('type', 'unknown')
@@ -1187,41 +1400,48 @@ class FinancialTrackerApp(ctk.CTk):
                 amt_txt = f"{base:,.2f} DZD"
                 amt_sub_txt = f"≈ ${base / dr:,.2f}"
             col = COLOR_TEXT_SUB
+        elif t_type == 'loan_out':
+            who = t.get('borrower', '?')
+            status = t.get('status', 'active')
+            main_txt = f"Lent to {who}"
+            sub_txt = f"{display_date}  •  {'Active' if status == 'active' else 'Repaid'}"
+            if t.get('currency') == 'USD':
+                amt_txt = f"${base:,.2f}"
+                amt_sub_txt = f"≈ {base * dr:,.0f} DZD"
+            else:
+                amt_txt = f"{base:,.2f} DZD"
+                amt_sub_txt = f"≈ ${base / dr:,.2f}"
+            col = COLOR_LOAN
+        elif t_type == 'loan_repaid':
+            who = t.get('borrower', '?')
+            main_txt = f"Repaid by {who}"
+            sub_txt = display_date
+            if t.get('currency') == 'USD':
+                amt_txt = f"+ ${base:,.2f}"
+                amt_sub_txt = f"≈ {base * dr:,.0f} DZD"
+            else:
+                amt_txt = f"+ {base:,.2f} DZD"
+                amt_sub_txt = f"≈ ${base / dr:,.2f}"
+            col = COLOR_SUCCESS
         else:
             main_txt = "Legacy Transfer"
             sub_txt = display_date
             amt_txt = "Processed"
             col = COLOR_PRIMARY
 
-        # --- Row container with left accent ---
         outer = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=12, border_width=1, border_color=COLOR_BORDER)
         outer.pack(fill="x", pady=3)
-
         inner = ctk.CTkFrame(outer, fg_color="transparent")
-        inner.pack(fill="x", padx=0, pady=0)
-
-        # Colored accent dot
+        inner.pack(fill="x")
         dot_frame = ctk.CTkFrame(inner, fg_color="transparent", width=20)
         dot_frame.pack(side="left", padx=(12, 0), pady=14)
-        dot = ctk.CTkFrame(dot_frame, width=8, height=8, corner_radius=4, fg_color=col)
-        dot.pack()
-
-        # Text
+        ctk.CTkFrame(dot_frame, width=8, height=8, corner_radius=4, fg_color=col).pack()
         tf = ctk.CTkFrame(inner, fg_color="transparent")
         tf.pack(side="left", padx=(8, 10), pady=10)
         ctk.CTkLabel(tf, text=main_txt, font=("Segoe UI Semibold", 14), text_color=COLOR_TEXT_MAIN).pack(anchor="w")
         ctk.CTkLabel(tf, text=sub_txt, font=("Segoe UI", 12), text_color=COLOR_TEXT_SUB).pack(anchor="w")
-
-        # Delete button
         if not simple:
-            ctk.CTkButton(
-                inner, text="×", width=28, height=28, corner_radius=8,
-                fg_color="transparent", hover_color=COLOR_DANGER,
-                font=("Segoe UI", 16), text_color=COLOR_TEXT_DIM,
-                command=lambda _id=t.get('id', ''): self.delete_transaction(_id)
-            ).pack(side="right", padx=(4, 12))
-
-        # Amount
+            ctk.CTkButton(inner, text="×", width=28, height=28, corner_radius=8, fg_color="transparent", hover_color=COLOR_DANGER, font=("Segoe UI", 16), text_color=COLOR_TEXT_DIM, command=lambda _id=t.get('id', ''): self.delete_transaction(_id)).pack(side="right", padx=(4, 12))
         af = ctk.CTkFrame(inner, fg_color="transparent")
         af.pack(side="right", padx=12, pady=10)
         ctk.CTkLabel(af, text=amt_txt, font=("Segoe UI Bold", 15), text_color=col).pack(anchor="e")
