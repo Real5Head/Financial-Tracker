@@ -378,6 +378,8 @@ class FinancialTrackerApp(ctk.CTk):
                 s['usd'] -= sf('amount_usd'); s['dzd'] += sf('amount_dzd')
             elif tt == 'transfer_eur_dzd':
                 s['eur'] -= sf('amount_eur'); s['dzd'] += sf('amount_dzd')
+            elif tt == 'transfer_dzd_eur':
+                s['dzd'] -= sf('amount_dzd'); s['eur'] += sf('amount_eur')
             elif tt == 'transfer_paypal_bank':
                 s['paypal'] -= sf('amount_sent'); s['usd'] += sf('amount_received')
             elif tt == 'savings_deposit':
@@ -635,6 +637,12 @@ class FinancialTrackerApp(ctk.CTk):
         self.e_ex_eur_rate = self.inp(c3, "Rate (1 EUR = ? DZD)"); self.e_ex_eur_rate.pack(fill="x", pady=6)
         self.btn(c3, "Confirm Sale", COLOR_EUR, COLOR_EUR_DIM, self.transfer_eur_dzd).pack(fill="x", pady=(12,6))
 
+        # Buy EUR with DZD
+        t4 = tv.add("DZD → EUR"); c4 = ctk.CTkFrame(t4, fg_color="transparent"); c4.pack(fill="x", padx=20, pady=10)
+        self.e_buy_eur_dzd = self.inp(c4, "DZD Amount to spend"); self.e_buy_eur_dzd.pack(fill="x", pady=6)
+        self.e_buy_eur_rate = self.inp(c4, "Rate (1 EUR = ? DZD)"); self.e_buy_eur_rate.pack(fill="x", pady=6)
+        self.btn(c4, "Buy EUR", COLOR_EUR, COLOR_EUR_DIM, self.transfer_dzd_eur).pack(fill="x", pady=(12,6))
+
         ctk.CTkLabel(f, text="Transfer History", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).pack(anchor="w", padx=30, pady=(20,8))
         self.transfer_list = ctk.CTkScrollableFrame(f, fg_color="transparent", scrollbar_button_color=COLOR_BORDER); self.transfer_list.pack(fill="both", expand=True, padx=30, pady=(0,20))
 
@@ -790,6 +798,16 @@ class FinancialTrackerApp(ctk.CTk):
         t = {"id":str(uuid.uuid4()),"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"type":"transfer_eur_dzd","amount_eur":eur,"rate":rate,"amount_dzd":eur*rate}
         if self.add_transaction_to_db(t): self.e_ex_eur.delete(0,'end'); self.e_ex_eur_rate.delete(0,'end'); self.show_success_native("Exchange complete.")
 
+    def transfer_dzd_eur(self):
+        try:
+            dzd = float(self.e_buy_eur_dzd.get()); rate = float(self.e_buy_eur_rate.get())
+            if dzd <= 0 or rate <= 0: raise ValueError
+        except ValueError: self.show_error_native("Enter valid numbers."); return
+        if not self._check_bal("DZD", dzd): return
+        eur_received = dzd / rate
+        t = {"id":str(uuid.uuid4()),"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"type":"transfer_dzd_eur","amount_dzd":dzd,"rate":rate,"amount_eur":eur_received}
+        if self.add_transaction_to_db(t): self.e_buy_eur_dzd.delete(0,'end'); self.e_buy_eur_rate.delete(0,'end'); self.show_success_native("EUR purchased.")
+
     def add_expense(self):
         desc = self.e_exp_desc.get().strip()
         if not desc: self.show_error_native("Enter a description."); return
@@ -888,6 +906,9 @@ class FinancialTrackerApp(ctk.CTk):
         elif tt == 'transfer_eur_dzd':
             main_t = "EUR → DZD"; sub_t = f"{td}  •  Rate: {t.get('rate','?')}"
             amt_t = f"+ {sf('amount_dzd'):,.2f} DZD"; amt_s = f"- €{sf('amount_eur'):,.2f}"; col = COLOR_EUR
+        elif tt == 'transfer_dzd_eur':
+            main_t = "DZD → EUR"; sub_t = f"{td}  •  Rate: {t.get('rate','?')}"
+            amt_t = f"+ €{sf('amount_eur'):,.2f}"; amt_s = f"- {sf('amount_dzd'):,.0f} DZD"; col = COLOR_EUR
         elif tt == 'transfer_paypal_bank':
             main_t = "PayPal → Bank"; sub_t = f"{td}  •  Fee: ${sf('fee_paid'):,.2f}"
             amt_t = f"+ ${sf('amount_received'):,.2f}"; amt_s = f"≈ {sf('amount_received')*ur:,.0f} DZD"; col = COLOR_WARNING
