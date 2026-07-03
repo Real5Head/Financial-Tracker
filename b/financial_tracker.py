@@ -380,6 +380,10 @@ class FinancialTrackerApp(ctk.CTk):
                 s['eur'] -= sf('amount_eur'); s['dzd'] += sf('amount_dzd')
             elif tt == 'transfer_dzd_eur':
                 s['dzd'] -= sf('amount_dzd'); s['eur'] += sf('amount_eur')
+            elif tt == 'transfer_eur_usd':
+                s['eur'] -= sf('amount_eur'); s['usd'] += sf('amount_usd')
+            elif tt == 'transfer_usd_eur':
+                s['usd'] -= sf('amount_usd'); s['eur'] += sf('amount_eur')
             elif tt == 'transfer_paypal_bank':
                 s['paypal'] -= sf('amount_sent'); s['usd'] += sf('amount_received')
             elif tt == 'savings_deposit':
@@ -643,6 +647,14 @@ class FinancialTrackerApp(ctk.CTk):
         self.e_buy_eur_rate = self.inp(c4, "Rate (1 EUR = ? DZD)"); self.e_buy_eur_rate.pack(fill="x", pady=6)
         self.btn(c4, "Buy EUR", COLOR_EUR, COLOR_EUR_DIM, self.transfer_dzd_eur).pack(fill="x", pady=(12,6))
 
+        # EUR ↔ USD direct swap
+        t5 = tv.add("EUR ↔ USD"); c5 = ctk.CTkFrame(t5, fg_color="transparent"); c5.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(c5, text="No rate needed — just enter what you sent and what you received.", font=FONT_TINY, text_color=COLOR_TEXT_DIM).pack(anchor="w", pady=(0,8))
+        self.combo_swap_dir = self.combo(c5, ["EUR → USD", "USD → EUR"]); self.combo_swap_dir.pack(fill="x", pady=6)
+        self.e_swap_sent = self.inp(c5, "Amount Sent"); self.e_swap_sent.pack(fill="x", pady=6)
+        self.e_swap_received = self.inp(c5, "Amount Received"); self.e_swap_received.pack(fill="x", pady=6)
+        self.btn(c5, "Confirm Swap", COLOR_PRIMARY, COLOR_PRIMARY_DIM, self.transfer_eur_usd_swap).pack(fill="x", pady=(12,6))
+
         ctk.CTkLabel(f, text="Transfer History", font=FONT_SUBHEADER, text_color=COLOR_TEXT_MAIN).pack(anchor="w", padx=30, pady=(20,8))
         self.transfer_list = ctk.CTkScrollableFrame(f, fg_color="transparent", scrollbar_button_color=COLOR_BORDER); self.transfer_list.pack(fill="both", expand=True, padx=30, pady=(0,20))
 
@@ -808,6 +820,24 @@ class FinancialTrackerApp(ctk.CTk):
         t = {"id":str(uuid.uuid4()),"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"type":"transfer_dzd_eur","amount_dzd":dzd,"rate":rate,"amount_eur":eur_received}
         if self.add_transaction_to_db(t): self.e_buy_eur_dzd.delete(0,'end'); self.e_buy_eur_rate.delete(0,'end'); self.show_success_native("EUR purchased.")
 
+    def transfer_eur_usd_swap(self):
+        direction = self.combo_swap_dir.get()
+        try:
+            sent = float(self.e_swap_sent.get()); received = float(self.e_swap_received.get())
+            if sent <= 0 or received <= 0: raise ValueError
+        except ValueError: self.show_error_native("Enter valid positive amounts for both fields."); return
+
+        if "EUR → USD" in direction:
+            if not self._check_bal("EUR", sent): return
+            t = {"id":str(uuid.uuid4()),"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"type":"transfer_eur_usd","amount_eur":sent,"amount_usd":received}
+        else:
+            if not self._check_bal("USD", sent): return
+            t = {"id":str(uuid.uuid4()),"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"type":"transfer_usd_eur","amount_usd":sent,"amount_eur":received}
+
+        if self.add_transaction_to_db(t):
+            self.e_swap_sent.delete(0,'end'); self.e_swap_received.delete(0,'end')
+            self.show_success_native("Swap complete.")
+
     def add_expense(self):
         desc = self.e_exp_desc.get().strip()
         if not desc: self.show_error_native("Enter a description."); return
@@ -909,6 +939,12 @@ class FinancialTrackerApp(ctk.CTk):
         elif tt == 'transfer_dzd_eur':
             main_t = "DZD → EUR"; sub_t = f"{td}  •  Rate: {t.get('rate','?')}"
             amt_t = f"+ €{sf('amount_eur'):,.2f}"; amt_s = f"- {sf('amount_dzd'):,.0f} DZD"; col = COLOR_EUR
+        elif tt == 'transfer_eur_usd':
+            main_t = "EUR → USD"; sub_t = td
+            amt_t = f"+ ${sf('amount_usd'):,.2f}"; amt_s = f"- €{sf('amount_eur'):,.2f}"; col = COLOR_PRIMARY
+        elif tt == 'transfer_usd_eur':
+            main_t = "USD → EUR"; sub_t = td
+            amt_t = f"+ €{sf('amount_eur'):,.2f}"; amt_s = f"- ${sf('amount_usd'):,.2f}"; col = COLOR_EUR
         elif tt == 'transfer_paypal_bank':
             main_t = "PayPal → Bank"; sub_t = f"{td}  •  Fee: ${sf('fee_paid'):,.2f}"
             amt_t = f"+ ${sf('amount_received'):,.2f}"; amt_s = f"≈ {sf('amount_received')*ur:,.0f} DZD"; col = COLOR_WARNING
