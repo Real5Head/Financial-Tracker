@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.0 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.1 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -15,7 +15,10 @@ Important upgrade rules:
 * Existing EUR belongs to EUR bank. EUR cash starts at zero.
 * Historical payloads are not rewritten on startup. New amounts use decimal strings.
 * New writes are locked, validated and committed atomically. Voiding is reversible.
-* Stored display rates are retained in backups but are not used by this version.
+* Existing USD/EUR display rates value your bank, cash and savings in DZD.
+  They never change recorded amounts or add rate fields to the transfer form.
+* The DZD total excludes unpaid loans, matching the original cash/savings total.
+* Activity rows use type colors; voided entries stay muted.
 
 No money is moved by this application: it records transactions you already made.
 """
@@ -53,7 +56,7 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -64,6 +67,10 @@ CURRENCIES = ("USD", "EUR", "DZD")
 KINDS = ("income", "expense", "transfer", "savings_deposit", "savings_withdraw",
          "loan_out", "loan_repaid", "opening", "adjustment")
 CATEGORIES = ("Essentials", "Business", "Food", "Transport", "Shopping", "Debt", "Other")
+# Keep the original setting keys. Rates are display estimates, not ledger money.
+DISPLAY_RATE_KEYS = {"USD": "display_rate", "EUR": "display_rate_eur"}
+RATE_UNIT = Decimal("0.000001")
+MAX_DISPLAY_RATE = Decimal("1000000")
 
 
 class ValidationError(Exception):
@@ -196,6 +203,82 @@ def rate_text(src: str, dst: str, sent: Decimal, received: Decimal) -> str:
     rendered = f"{rate:,.{places}f}".rstrip("0").rstrip(".")
     return f"1 {a} = {rendered} {b}"
 
+
+
+def display_rate(value: Any, label: str = "Display rate", *, stored: bool = False) -> Decimal:
+    """Positive DZD per currency unit, up to six decimals; never a live quote.
+
+    Original PostgreSQL settings use FLOAT. Canonical six-decimal strings make
+    revisions stable when a rate is reread from that existing column. Financial
+    transaction amounts and the money() parser are not changed by these settings.
+    """
+    if value is None or isinstance(value, bool):
+        raise ValidationError(f"{label}: enter a positive DZD value.")
+    text = str(value).strip()
+    if not stored:
+        text = text.replace("\u00a0", "").replace("\u202f", "").replace(" ", "")
+        if len(text) > 24 or not re.fullmatch(r"\+?\d+(?:[.,]\d{1,6})?", text):
+            raise ValidationError(f"{label}: use a positive number with up to 6 decimals.")
+        text = text.replace(",", ".")
+    try:
+        result = Decimal(text)
+        if not result.is_finite() or result <= 0 or result > MAX_DISPLAY_RATE:
+            raise InvalidOperation
+        result = result.quantize(RATE_UNIT, rounding=ROUND_HALF_UP)
+        if result <= 0:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValidationError(f"{label}: use a finite rate from 0.000001 to 1,000,000 DZD.") from None
+    return result
+
+
+def display_rates(settings: Dict[str, Any]) -> Dict[str, Optional[Decimal]]:
+    """Read original rate settings without inventing defaults for missing quotes."""
+    result: Dict[str, Optional[Decimal]] = {}
+    for currency, key in DISPLAY_RATE_KEYS.items():
+        try:
+            result[currency] = display_rate(settings.get(key), stored=True)
+        except ValidationError:
+            result[currency] = None
+    return result
+
+
+def display_rate_revision(settings: Dict[str, Any]) -> str:
+    """Optimistic concurrency check limited to the two editable display settings."""
+    canonical = {}
+    for key in DISPLAY_RATE_KEYS.values():
+        value = settings.get(key)
+        try:
+            canonical[key] = str(display_rate(value, stored=True))
+        except ValidationError:
+            canonical[key] = None if value is None else "invalid:" + str(value)
+    return fingerprint(canonical)
+
+
+def display_rate_payload(values: Dict[str, Any]) -> Dict[str, str]:
+    if set(values) != set(DISPLAY_RATE_KEYS.values()):
+        raise ValidationError("Supply both USD and EUR display rates, and no other settings.")
+    return {key: str(display_rate(values[key], f"1 {currency} in DZD"))
+            for currency, key in DISPLAY_RATE_KEYS.items()}
+
+
+def compact_rate(value: Decimal) -> str:
+    return format(value, "f").rstrip("0").rstrip(".") if "." in format(value, "f") else format(value, "f")
+
+
+def dzd_equivalent(amounts: Dict[str, Decimal], settings: Dict[str, Any]) -> Optional[Decimal]:
+    """Value the supplied balances once. None means a necessary rate is missing."""
+    rates = display_rates(settings)
+    total = amounts.get("DZD", ZERO)
+    for currency in ("USD", "EUR"):
+        amount = amounts.get(currency, ZERO)
+        if amount == ZERO:
+            continue
+        rate = rates[currency]
+        if rate is None:
+            return None
+        total += amount * rate
+    return total.quantize(CENT, rounding=ROUND_HALF_UP)
 
 @dataclass
 class Record:
@@ -403,6 +486,13 @@ def project(raw_records: List[Dict[str, Any]], settings: Optional[Dict[str, Any]
     return snap
 
 
+def total_in_dinars(snapshot: Snapshot) -> Optional[Decimal]:
+    """Available + saved in all four accounts. Unpaid loans are NOT held cash."""
+    if not snapshot.valid:
+        return None
+    return dzd_equivalent(snapshot.currency_totals(include_loans=False), snapshot.settings)
+
+
 def record_payload(kind: str, values: Dict[str, Any], *, rid: Optional[str] = None) -> Dict[str, Any]:
     """The only constructor for new financial entries (no rate/fee input)."""
     if kind not in KINDS or kind == "adjustment":
@@ -445,6 +535,17 @@ class Command:
     @property
     def digest(self) -> str:
         return fingerprint({"action": self.action, "record": self.record, "expected": self.expected})
+
+
+def apply_display_rates(settings: Dict[str, Any], command: Command) -> Dict[str, Any]:
+    """Change valuation preferences only; no transaction or balance is modified."""
+    if command.action != "display_rates":
+        raise ValidationError("Unsupported settings operation.")
+    if command.expected != display_rate_revision(settings):
+        raise ConflictError("Display rates changed on another device. Close this window, refresh, and reopen it.")
+    updated = copy.deepcopy(settings)
+    updated.update(display_rate_payload(command.record))
+    return updated
 
 
 def apply_command(raw: List[Dict[str, Any]], cmd: Command) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -798,6 +899,10 @@ class Repository:
                 with connection.cursor() as cur:
                     self._limits(cur)
                     cur.execute("LOCK TABLE transactions IN SHARE ROW EXCLUSIVE MODE")
+                    if command.action == "display_rates":
+                        # Lock in the same order on every client. Keep the two
+                        # display settings atomic, including writes by older apps.
+                        cur.execute("LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE")
                     cur.execute("SELECT request_hash FROM finance_tracker_operations WHERE operation_id = %s", (command.operation_id,))
                     existing = cur.fetchone()
                     records, settings = self._read(cur)
@@ -806,17 +911,25 @@ class Repository:
                             raise ConflictError("An operation ID was reused for different data. Reopen the form.")
                         snapshot = project(records, settings)
                     else:
-                        proposed, changed = apply_command(records, command)
-                        existing_ids = {r["id"] for r in records}
-                        for item in changed:
-                            if item["id"] in existing_ids:
-                                cur.execute("UPDATE transactions SET t_date=%s, t_type=%s, payload=%s WHERE id=%s",
-                                            (item["date"], item["type"], Json(item, dumps=canonical_json), item["id"]))
-                                if cur.rowcount != 1:
-                                    raise ConflictError("The record changed while saving. Refresh and retry.")
-                            else:
-                                cur.execute("INSERT INTO transactions (id, t_date, t_type, payload) VALUES (%s, %s, %s, %s)",
-                                            (item["id"], item["date"], item["type"], Json(item, dumps=canonical_json)))
+                        if command.action == "display_rates":
+                            settings = apply_display_rates(settings, command)
+                            for key in DISPLAY_RATE_KEYS.values():
+                                cur.execute("INSERT INTO settings (key, value) VALUES (%s, %s) "
+                                            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                                            (key, Decimal(settings[key])))
+                            proposed = records
+                        else:
+                            proposed, changed = apply_command(records, command)
+                            existing_ids = {r["id"] for r in records}
+                            for item in changed:
+                                if item["id"] in existing_ids:
+                                    cur.execute("UPDATE transactions SET t_date=%s, t_type=%s, payload=%s WHERE id=%s",
+                                                (item["date"], item["type"], Json(item, dumps=canonical_json), item["id"]))
+                                    if cur.rowcount != 1:
+                                        raise ConflictError("The record changed while saving. Refresh and retry.")
+                                else:
+                                    cur.execute("INSERT INTO transactions (id, t_date, t_type, payload) VALUES (%s, %s, %s, %s)",
+                                                (item["id"], item["date"], item["type"], Json(item, dumps=canonical_json)))
                         cur.execute("INSERT INTO finance_tracker_operations (operation_id, request_hash) VALUES (%s, %s)",
                                     (command.operation_id, command.digest))
                         snapshot = project(proposed, settings)
@@ -829,8 +942,12 @@ class Repository:
 
 class DemoRepository:
     """Explicitly isolated preview mode: no real connection, files or money."""
-    def __init__(self, records: Optional[List[Dict[str, Any]]] = None):
+    def __init__(self, records: Optional[List[Dict[str, Any]]] = None,
+                 settings: Optional[Dict[str, Any]] = None):
         self.records = copy.deepcopy(records if records is not None else demo_records())
+        # Explicitly fictional demo rates, never copied into a real database.
+        self.settings = copy.deepcopy(settings if settings is not None else
+                                      {"display_rate": 237.0, "display_rate_eur": 240.0})
         self.operations: Dict[str, str] = {}
         self.lock = threading.Lock()
         self.parameters = {"host": "DEMO - no database", "dbname": "Sample records", "sslmode": "not applicable"}
@@ -843,17 +960,20 @@ class DemoRepository:
 
     def fetch(self) -> Snapshot:
         with self.lock:
-            return project(self.records)
+            return project(self.records, self.settings)
 
     def write(self, command: Command) -> Snapshot:
         with self.lock:
             if command.operation_id in self.operations:
                 if self.operations[command.operation_id] != command.digest:
                     raise ConflictError("Operation ID reused with different data.")
-                return project(self.records)
-            self.records, _ = apply_command(self.records, command)
+                return project(self.records, self.settings)
+            if command.action == "display_rates":
+                self.settings = apply_display_rates(self.settings, command)
+            else:
+                self.records, _ = apply_command(self.records, command)
             self.operations[command.operation_id] = command.digest
-            return project(self.records)
+            return project(self.records, self.settings)
 
 
 def demo_records() -> List[Dict[str, Any]]:
@@ -930,7 +1050,24 @@ P = {"bg": "#111318", "sidebar": "#0C0E12", "card": "#1A1D24", "field": "#13161C
      "border": "#2A2E38", "hover": "#242832", "text": "#EDEEF2", "muted": "#979EAD",
      "dim": "#858E9E", "accent": "#C2B3E3", "accent_dark": "#A795CC",
      "green": "#A7C9B6", "red": "#D8A2A2", "amber": "#D2BC94", "selection": "#303041"}
+# Text colors are independent of alternating dark row backgrounds.
+ACTIVITY_COLORS = {
+    "income": "#8FD6A3", "expense": "#F2A3A3", "transfer": "#AFC3FF",
+    "savings_deposit": "#E5C07B", "savings_withdraw": "#9BD3AE",
+    "loan_out": "#F0A0A0", "loan_repaid": "#8FD6A3",
+    "opening": "#C6B3F2", "adjustment": "#C6B3F2",
+}
 FONT_FAMILY = "Arial"
+
+
+def activity_color(record: Record) -> str:
+    return P["dim"] if record.voided else ACTIVITY_COLORS.get(record.kind, P["text"])
+
+
+def activity_tags(record: Record, index: int) -> Tuple[str, ...]:
+    # A voided record must never retain its active transaction-type foreground.
+    stripe = ("alternate",) if index % 2 else ()
+    return stripe + (("voided",) if record.voided else (record.kind,))
 
 
 def font(size: int = 14, bold: bool = False) -> Tuple[str, int, str]:
@@ -1174,6 +1311,93 @@ class Modal(tk.Toplevel):
         except tk.TclError:
             pass
         self.destroy()
+
+
+class DisplayRatesDialog(Modal):
+    """Separate display preferences. Transfers never ask the user for a rate."""
+    def __init__(self, app):
+        self.fields: Dict[str, Field] = {}
+        self.pending: Optional[Command] = None
+        self.saving = False
+        self.expected = display_rate_revision(app.snapshot.settings)
+        super().__init__(app, "Dinar display rates",
+                         "For your combined DZD estimate only. Your recorded balances and transfer amounts stay unchanged.",
+                         height=615)
+        rates = display_rates(app.snapshot.settings)
+        for currency, key in DISPLAY_RATE_KEYS.items():
+            value = compact_rate(rates[currency]) if rates[currency] is not None else ""
+            field_ = Field(self.body, f"1 {currency} = how many DZD?", value,
+                           hint="Use your preferred valuation rate, not an amount to transfer.")
+            field_.pack(fill="x", pady=(0, 18))
+            self.fields[key] = field_
+            field_.var.trace_add("write", self.update_preview)
+        box = card(self.body)
+        box.pack(fill="x", pady=(2, 16))
+        label(box, "TOTAL IN DINARS  /  PREVIEW", 10, P["dim"], True).pack(fill="x", padx=18, pady=(16, 8))
+        self.preview = label(box, "", 25, P["accent"], True, wraplength=535, justify="left")
+        self.preview.pack(fill="x", padx=18, pady=(0, 16))
+        label(self.body, "Saved for this database and reused on its other devices. Existing rates from the original app are kept. No live exchange-rate service is used.",
+              12, P["muted"], wraplength=550, justify="left").pack(fill="x", pady=(0, 12))
+        self.cancel_button = Button(self.buttons, "Cancel", self.close, variant="secondary")
+        self.cancel_button.pack(side="left")
+        self.save_button = Button(self.buttons, "Save display rates", self.save, width=180)
+        self.save_button.pack(side="right")
+        self.update_preview()
+        self.bind("<Control-Return>", lambda e: self.save())
+        if sys.platform == "darwin":
+            self.bind("<Command-Return>", lambda e: self.save())
+        self.after(80, lambda: self.fields["display_rate"].input.focus_set())
+
+    def update_preview(self, *args):
+        if not hasattr(self, "preview"):
+            return
+        try:
+            settings = display_rate_payload({key: f.get() for key, f in self.fields.items()})
+            total = dzd_equivalent(self.app.snapshot.currency_totals(), settings) if self.app.snapshot.valid else None
+            self.preview.configure(text=("\u2248 " + fmt(total, "DZD")) if total is not None else "Review ledger data checks.")
+        except ValidationError:
+            self.preview.configure(text="Enter both display rates.")
+
+    def freeze(self, frozen):
+        for field_ in self.fields.values():
+            field_.enable(not frozen)
+
+    def save(self):
+        if self.saving:
+            return
+        if self.pending is None:
+            try:
+                if not self.app.can_write():
+                    raise ValidationError("Reconnect or refresh successfully before changing display rates.")
+                values = display_rate_payload({key: f.get() for key, f in self.fields.items()})
+                self.pending = Command("display_rates", values, expected=self.expected)
+            except ValidationError as exc:
+                self.error.configure(text=str(exc))
+                return
+        self.saving = True
+        self.freeze(True)
+        self.save_button.set_enabled(False)
+        self.save_button.set_text("Saving...")
+        self.cancel_button.set_enabled(False)
+        self.error.configure(text="")
+        self.app.commit(self.pending, self._saved)
+
+    def _saved(self, snapshot, error):
+        self.saving = False
+        if error is None:
+            self.pending = None
+            self.close()
+            return
+        self.cancel_button.set_enabled(True)
+        self.save_button.set_enabled(True)
+        if isinstance(error, ValidationError):
+            self.pending = None
+            self.freeze(False)
+            self.save_button.set_text("Save display rates")
+        else:
+            self.save_button.set_text("Retry safely")
+        suffix = "\nThe form is locked so a retry uses the same operation." if self.pending else ""
+        self.error.configure(text=friendly_error(error) + suffix)
 
 
 class TransactionDialog(Modal):
@@ -1443,7 +1667,7 @@ class DetailDialog(Modal):
         summary = card(self.body)
         summary.pack(fill="x", pady=(0, 18))
         label(summary, KIND_NAMES[record.kind].upper() + ("  /  VOIDED" if record.voided else ""), 10, P["dim"], True).pack(fill="x", padx=20, pady=(18, 8))
-        label(summary, record.amount_text, 22, P["red"] if record.voided else P["text"], True,
+        label(summary, record.amount_text, 22, activity_color(record), True,
               wraplength=550, justify="left").pack(fill="x", padx=20, pady=(0, 18))
         fields = [("Description", record.title), ("Date", record.day), ("Account", record.route)]
         if record.kind == "transfer":
@@ -1863,7 +2087,8 @@ class FinanceApp(tk.Tk):
                 self.snapshot, self.online, self.has_snapshot = snapshot, True, True
                 self.last_refresh = time.monotonic()
                 self.render()
-                self.toast("Saved. Your balances have been updated.")
+                self.toast("Display rates saved. Only the DZD estimate changed." if command.action == "display_rates"
+                           else "Saved. Your balances have been updated.")
             elif not isinstance(error, ValidationError):
                 self.online = False
             self.update_status()
@@ -1951,6 +2176,50 @@ class FinanceApp(tk.Tk):
             state["page"] = 0
         self.render()
 
+    def open_display_rates(self):
+        if self.modals:
+            next(iter(self.modals)).lift()
+            return
+        if not self.can_write():
+            self.toast("Connect and resolve any data checks before changing display rates.", error=True)
+            return
+        DisplayRatesDialog(self)
+
+    def dinar_total_card(self, parent):
+        box = card(parent)
+        box.pack(fill="x", pady=(0, 22))
+        inner = tk.Frame(box, bg=P["card"])
+        inner.pack(fill="x", padx=22, pady=18)
+        top = tk.Frame(inner, bg=P["card"])
+        top.pack(fill="x")
+        label(top, "TOTAL IN DINARS", 11, P["accent"], True).pack(side="left")
+        Button(top, "Display rates", self.open_display_rates, variant="secondary",
+               height=30, small=True).pack(side="right")
+        total = total_in_dinars(self.snapshot)
+        rates = display_rates(self.snapshot.settings)
+        if not self.snapshot.valid:
+            text = "Unavailable"
+        elif total is None:
+            text = "Set display rates"
+        else:
+            text = "\u2248 " + fmt(total, "DZD")
+        self.dinar_total_label = label(inner, text, 34 if len(text) <= 25 else 26,
+                                       P["red"] if total is not None and total < ZERO else P["text"], True)
+        self.dinar_total_label.pack(fill="x", pady=(4, 8))
+        note = label(inner, "Bank + cash + savings. Unpaid loans are excluded. Current balances, not just this month.",
+                     12, P["muted"], wraplength=880, justify="left")
+        note.pack(fill="x")
+        quotes = "    /    ".join(f"1 {currency} = {compact_rate(rates[currency])} DZD" if rates[currency] is not None
+                                  else f"{currency} rate not set" for currency in DISPLAY_RATE_KEYS)
+        self.dinar_rates_label = label(inner, quotes + "    /    Display estimate only", 11, P["dim"],
+                                       wraplength=880, justify="left")
+        self.dinar_rates_label.pack(fill="x", pady=(8, 0))
+        def wrap(event):
+            width = max(220, event.width)
+            note.configure(wraplength=width)
+            self.dinar_rates_label.configure(wraplength=width)
+        inner.bind("<Configure>", wrap)
+
     def account_cards(self, parent, mode="available"):
         grid = tk.Frame(parent, bg=P["bg"])
         grid.pack(fill="x", pady=(0, 22))
@@ -2024,6 +2293,7 @@ class FinanceApp(tk.Tk):
         elif self.snapshot.legacy_pending != ZERO and page == "overview":
             self.notice(body, f"UPGRADE NOTE  /  Your old pending USD balance ({fmt(self.snapshot.legacy_pending, 'USD')}) is now included in USD bank. No money was moved. Review that total before using it as a bank balance.")
         if page == "overview":
+            self.dinar_total_card(body)
             heading = tk.Frame(body, bg=P["bg"])
             heading.pack(fill="x", pady=(0, 12))
             label(heading, "Your accounts", 17, bold=True).pack(side="left")
@@ -2050,7 +2320,7 @@ class FinanceApp(tk.Tk):
                 box = card(row)
                 box.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 7, 0 if i == 2 else 7))
                 label(box, c + "  /  " + ("RECEIVED" if kind == "income" else "SPENT"), 10, P["dim"], True).pack(fill="x", padx=20, pady=(20, 12))
-                label(box, fmt(totals[c], c) if self.snapshot.valid else "--", 27, P["green"] if kind == "income" else P["text"], True).pack(fill="x", padx=20, pady=(0, 22))
+                label(box, fmt(totals[c], c) if self.snapshot.valid else "--", 27, P["green"] if kind == "income" else P["red"], True).pack(fill="x", padx=20, pady=(0, 22))
             self.activity_table(body, allowed={kind}, selected_month=True)
         elif page == "transfers":
             info = card(body)
@@ -2134,6 +2404,8 @@ class FinanceApp(tk.Tk):
         bar.pack(side="right", fill="y")
         tree.tag_configure("voided", foreground=P["dim"])
         tree.tag_configure("alternate", background="#1C1F27")
+        for kind, color in ACTIVITY_COLORS.items():
+            tree.tag_configure(kind, foreground=color)
         tree.bind("<Double-1>", lambda e: self.open_selected(tree))
         tree.bind("<Return>", lambda e: self.open_selected(tree))
         footer = tk.Frame(parent, bg=P["bg"])
@@ -2186,7 +2458,7 @@ class FinanceApp(tk.Tk):
         for i, rec in enumerate(rows[start:start+size]):
             title_ = ("[Voided] " if rec.voided else "") + rec.title
             tree.insert("", "end", iid=rec.id, values=(rec.day, title_, rec.route, rec.amount_text),
-                        tags=("voided",) if rec.voided else ("alternate",) if i % 2 else ())
+                        tags=activity_tags(rec, i))
         if not rows:
             context["count"].configure(text="No matching transactions. Add a record or adjust your filters.")
         else:
@@ -2257,6 +2529,14 @@ class FinanceApp(tk.Tk):
             label(inner, subtitle, 12, P["muted"], wraplength=880, justify="left").pack(fill="x", pady=(9, 17))
             sections.append(inner)
             return inner
+        conversion = section("Dinar display estimate", "Your combined DZD total includes every bank and cash account plus savings, without counting savings twice. Unpaid loans are shown under Lending, not in this cash total.")
+        rates = display_rates(self.snapshot.settings)
+        for currency in DISPLAY_RATE_KEYS:
+            text = f"1 {currency} = {compact_rate(rates[currency])} DZD" if rates[currency] is not None else f"{currency}: no valid display rate saved yet"
+            label(conversion, text, 14, P["muted"]).pack(fill="x", pady=(0, 8))
+        label(conversion, "Display-only preferences. Changing them never edits transactions or changes a transfer's calculated rate.",
+              11, P["dim"], wraplength=850, justify="left").pack(fill="x", pady=(4, 14))
+        Button(conversion, "Edit display rates", self.open_display_rates, variant="secondary").pack(anchor="w")
         accounts = section("Accounts and opening balances", "USD bank, EUR bank, EUR cash and DZD cash. Savings stay attached to the account that holds them.")
         totals = self.snapshot.currency_totals(include_loans=True)
         label(accounts, "TOTAL TRACKED ASSETS  /  AVAILABLE + SAVED + OUTSTANDING LOANS", 10, P["dim"], True).pack(fill="x", pady=(0, 9))
@@ -2290,7 +2570,7 @@ class FinanceApp(tk.Tk):
         else:
             for text in messages:
                 label(checks, text, 12, P["red"] if text in self.snapshot.errors else P["amber"], wraplength=860, justify="left").pack(fill="x", pady=(0, 12))
-        label(body, "FINANCE 2.0  /  BUILT FOR A SINGLE PERSONAL LEDGER", 10, P["dim"], True).pack(fill="x", pady=(10, 12))
+        label(body, "FINANCE 2.1  /  BUILT FOR A SINGLE PERSONAL LEDGER", 10, P["dim"], True).pack(fill="x", pady=(10, 12))
 
     def open_form(self, kind, record=None, loan=None, account=None):
         if self.modals:
