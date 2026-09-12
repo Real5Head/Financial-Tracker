@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.1.1 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.2.0 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -19,6 +19,7 @@ Important upgrade rules:
   They never change recorded amounts or add rate fields to the transfer form.
 * The DZD total excludes unpaid loans, matching the original cash/savings total.
 * Activity rows use type colors; voided entries stay muted.
+* The interface uses a cleaner Apple-inspired dark workspace with system colors.
 * macOS startup uses native-safe cursors, Keychain access and persistent crash logs.
 
 No money is moved by this application: it records transactions you already made.
@@ -80,7 +81,7 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2.0"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -190,10 +191,10 @@ class Account:
 
 
 ACCOUNTS: Dict[str, Account] = {
-    "usd_bank": Account("usd_bank", "USD bank", "USD", "Bank", "#B4A7D6"),
-    "eur_bank": Account("eur_bank", "EUR bank", "EUR", "Bank", "#9EB4CA"),
-    "eur_cash": Account("eur_cash", "EUR cash", "EUR", "Cash", "#C4B291"),
-    "dzd_cash": Account("dzd_cash", "DZD cash", "DZD", "Cash", "#9DB8A8"),
+    "usd_bank": Account("usd_bank", "USD bank", "USD", "Bank", "#0A84FF"),
+    "eur_bank": Account("eur_bank", "EUR bank", "EUR", "Bank", "#64D2FF"),
+    "eur_cash": Account("eur_cash", "EUR cash", "EUR", "Cash", "#FF9F0A"),
+    "dzd_cash": Account("dzd_cash", "DZD cash", "DZD", "Cash", "#30D158"),
 }
 ACCOUNT_NAMES = {a.name: a.key for a in ACCOUNTS.values()}
 DEFAULT_ACCOUNT = {"USD": "usd_bank", "EUR": "eur_bank", "DZD": "dzd_cash"}
@@ -1128,18 +1129,48 @@ def friendly_error(exc: Exception) -> str:
     return "This request could not be completed. No new balance has been assumed. Refresh or reconnect, then retry."
 
 # ---------------------------------------------------------------------------
-# Dark, standard-library UI. No images, web views, icon packages or asset files.
+# Apple-inspired dark desktop UI. Standard-library Tkinter only.
 # ---------------------------------------------------------------------------
-P = {"bg": "#111318", "sidebar": "#0C0E12", "card": "#1A1D24", "field": "#13161C",
-     "border": "#2A2E38", "hover": "#242832", "text": "#EDEEF2", "muted": "#979EAD",
-     "dim": "#858E9E", "accent": "#C2B3E3", "accent_dark": "#A795CC",
-     "green": "#A7C9B6", "red": "#D8A2A2", "amber": "#D2BC94", "selection": "#303041"}
-# Text colors are independent of alternating dark row backgrounds.
+P = {
+    "bg": "#0B0B0D",
+    "sidebar": "#101012",
+    "surface": "#161618",
+    "card": "#1C1C1E",
+    "card_alt": "#202023",
+    "card_hover": "#26262A",
+    "sheet": "#141416",
+    "field": "#242426",
+    "border": "#303034",
+    "hairline": "#28282B",
+    "hover": "#2C2C2E",
+    "nav_active": "#23232A",
+    "nav_hover": "#1B1B1F",
+    "hero": "#111E2C",
+    "hero_border": "#1F3A55",
+    "text": "#F5F5F7",
+    "muted": "#A1A1AA",
+    "dim": "#6E6E73",
+    "accent": "#0A84FF",
+    "accent_dark": "#409CFF",
+    "green": "#30D158",
+    "red": "#FF453A",
+    "amber": "#FF9F0A",
+    "purple": "#BF5AF2",
+    "cyan": "#64D2FF",
+    "selection": "#17446A",
+    "white": "#FFFFFF",
+}
+
 ACTIVITY_COLORS = {
-    "income": "#8FD6A3", "expense": "#F2A3A3", "transfer": "#AFC3FF",
-    "savings_deposit": "#E5C07B", "savings_withdraw": "#9BD3AE",
-    "loan_out": "#F0A0A0", "loan_repaid": "#8FD6A3",
-    "opening": "#C6B3F2", "adjustment": "#C6B3F2",
+    "income": P["green"],
+    "expense": P["red"],
+    "transfer": P["accent_dark"],
+    "savings_deposit": P["amber"],
+    "savings_withdraw": "#5DEB8B",
+    "loan_out": "#FF6961",
+    "loan_repaid": P["green"],
+    "opening": P["purple"],
+    "adjustment": P["purple"],
 }
 FONT_FAMILY = "Arial"
 
@@ -1149,7 +1180,6 @@ def activity_color(record: Record) -> str:
 
 
 def activity_tags(record: Record, index: int) -> Tuple[str, ...]:
-    # A voided record must never retain its active transaction-type foreground.
     stripe = ("alternate",) if index % 2 else ()
     return stripe + (("voided",) if record.voided else (record.kind,))
 
@@ -1164,24 +1194,42 @@ def label(parent, text="", size=14, color=None, bold=False, bg=None, **kwargs):
                     bg=bg or parent.cget("bg"), bd=0, **kwargs)
 
 
-def card(parent, **kwargs):
-    return tk.Frame(parent, bg=P["card"], highlightbackground=P["border"], highlightthickness=1, bd=0, **kwargs)
+def card(parent, *, tone=None, border=True, border_color=None, **kwargs):
+    background = tone or P["card"]
+    return tk.Frame(parent, bg=background,
+                    highlightbackground=border_color or P["border"],
+                    highlightthickness=1 if border else 0, bd=0, **kwargs)
 
 
-def line(parent, pady=16):
-    tk.Frame(parent, bg=P["border"], height=1).pack(fill="x", pady=pady)
+def line(parent, pady=16, color=None):
+    tk.Frame(parent, bg=color or P["hairline"], height=1).pack(fill="x", pady=pady)
+
+
+def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
+                 radius: float, *, fill: str, outline: str = "", width: int = 1,
+                 tags=None):
+    radius = max(1, min(radius, (x2-x1)/2, (y2-y1)/2))
+    points = [
+        x1+radius, y1, x2-radius, y1, x2, y1, x2, y1+radius,
+        x2, y2-radius, x2, y2, x2-radius, y2, x1+radius, y2,
+        x1, y2, x1, y2-radius, x1, y1+radius, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, splinesteps=24,
+                                 fill=fill, outline=outline, width=width, tags=tags)
 
 
 class Button(tk.Canvas):
-    def __init__(self, parent, text, command=None, *, variant="primary", width=None, height=40, small=False):
+    """Small native-safe rounded button with Apple system-color variants."""
+    def __init__(self, parent, text, command=None, *, variant="primary", width=None,
+                 height=40, small=False):
         self.text, self.command, self.variant = text, command, variant
         self.enabled = True
         self.hover = False
         self.focused = False
-        self.font_spec = font(12 if small else 13, True)
-        calculated = tkfont.Font(font=self.font_spec).measure(text) + 30
-        super().__init__(parent, width=width or calculated, height=height, bg=parent.cget("bg"),
-                         highlightthickness=0, bd=0, takefocus=1)
+        self.font_spec = font(11 if small else 13, True)
+        calculated = tkfont.Font(font=self.font_spec).measure(text) + (24 if small else 32)
+        super().__init__(parent, width=width or calculated, height=height,
+                         bg=parent.cget("bg"), highlightthickness=0, bd=0, takefocus=1)
         safe_cursor(self, True)
         self.bind("<Configure>", self._draw)
         self.bind("<Enter>", lambda e: self._hover(True))
@@ -1220,47 +1268,59 @@ class Button(tk.Canvas):
         if not self.winfo_exists():
             return
         w, h = max(2, self.winfo_width()), max(2, self.winfo_height())
+        parent_bg = self.master.cget("bg")
         if self.variant == "primary":
             fill = P["accent_dark"] if self.hover else P["accent"]
-            ink, edge = P["sidebar"], fill
+            ink, edge = P["white"], fill
         elif self.variant == "danger":
-            fill, ink, edge = ("#39282D" if self.hover else "#2B2228"), P["red"], "#523A43"
+            fill = "#4B2020" if self.hover else "#351B1B"
+            ink, edge = P["red"], "#66302F"
+        elif self.variant == "ghost":
+            fill = P["hover"] if self.hover else parent_bg
+            ink, edge = P["text"], fill
         else:
-            fill, ink, edge = (P["hover"] if self.hover else P["card"]), P["text"], P["border"]
+            fill = P["hover"] if self.hover else P["surface"]
+            ink, edge = P["text"], P["border"]
         if not self.enabled:
-            fill, ink, edge = P["card"], P["dim"], P["border"]
+            fill, ink, edge = P["surface"], P["dim"], P["hairline"]
         if self.focused and self.enabled:
-            edge = P["text"]
+            edge = P["accent_dark"]
         self.delete("all")
-        r = min(9, h / 3)
-        points = [r, 1, w-r, 1, w-1, 1, w-1, r, w-1, h-r,
-                  w-1, h-1, w-r, h-1, r, h-1, 1, h-1, 1, h-r, 1, r, 1, 1]
-        self.create_polygon(points, smooth=True, splinesteps=20, fill=fill, outline=edge, width=1)
+        rounded_rect(self, 1, 1, w-1, h-1, min(12, h/2), fill=fill,
+                     outline=edge, width=1)
         self.create_text(w/2, h/2, text=self.text, fill=ink, font=self.font_spec)
 
 
 class Field(tk.Frame):
-    def __init__(self, parent, title, value="", *, choices=None, hint="", secret=False, large=False):
+    def __init__(self, parent, title, value="", *, choices=None, hint="", secret=False,
+                 large=False):
         super().__init__(parent, bg=parent.cget("bg"))
-        self.title_label = label(self, title, 12, P["muted"], True)
-        self.title_label.pack(fill="x", pady=(0, 8))
+        self.title_label = label(self, title, 12, P["muted"])
+        self.title_label.pack(fill="x", pady=(0, 7))
         self.var = tk.StringVar(value=value)
         self.is_combo = choices is not None
+        self.box = None
         if choices is not None:
-            self.input = ttk.Combobox(self, textvariable=self.var, values=list(choices), state="readonly",
-                                      style="Finance.TCombobox", font=font(14))
+            self.input = ttk.Combobox(self, textvariable=self.var, values=list(choices),
+                                      state="readonly", style="Finance.TCombobox",
+                                      font=font(14))
             self.input.pack(fill="x", ipady=7)
         else:
-            box = tk.Frame(self, bg=P["field"], highlightthickness=1, highlightbackground=P["border"])
-            box.pack(fill="x")
-            self.input = tk.Entry(box, textvariable=self.var, font=font(22 if large else 14),
-                                  bg=P["field"], fg=P["text"], insertbackground=P["text"],
-                                  readonlybackground=P["field"], disabledbackground=P["field"],
-                                  disabledforeground=P["dim"], relief="flat", bd=0, highlightthickness=0,
-                                  show="\u2022" if secret else "", selectbackground=P["selection"])
-            self.input.pack(fill="x", padx=12, pady=11 if large else 10)
-            self.input.bind("<FocusIn>", lambda e: box.configure(highlightbackground=P["accent"]))
-            self.input.bind("<FocusOut>", lambda e: box.configure(highlightbackground=P["border"]))
+            self.box = tk.Frame(self, bg=P["field"], highlightthickness=1,
+                                highlightbackground=P["border"])
+            self.box.pack(fill="x")
+            self.input = tk.Entry(
+                self.box, textvariable=self.var, font=font(25 if large else 14),
+                bg=P["field"], fg=P["text"], insertbackground=P["text"],
+                readonlybackground=P["field"], disabledbackground=P["field"],
+                disabledforeground=P["dim"], relief="flat", bd=0,
+                highlightthickness=0, show="•" if secret else "",
+                selectbackground=P["selection"], selectforeground=P["white"])
+            self.input.pack(fill="x", padx=13, pady=12 if large else 11)
+            self.input.bind("<FocusIn>", lambda e: self.box.configure(
+                highlightbackground=P["accent"]))
+            self.input.bind("<FocusOut>", lambda e: self.box.configure(
+                highlightbackground=P["border"]))
         self.hint = label(self, hint, 11, P["dim"], wraplength=540, justify="left")
         if hint:
             self.hint.pack(fill="x", pady=(6, 0))
@@ -1283,7 +1343,8 @@ class ScrollArea(tk.Frame):
     def __init__(self, parent, *, bg=None):
         super().__init__(parent, bg=bg or parent.cget("bg"))
         self.canvas = tk.Canvas(self, bg=self.cget("bg"), bd=0, highlightthickness=0)
-        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview, style="Finance.Vertical.TScrollbar")
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
+                                 style="Finance.Vertical.TScrollbar")
         self.canvas.configure(yscrollcommand=self.bar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.bar.pack(side="right", fill="y")
@@ -1310,40 +1371,81 @@ class ScrollArea(tk.Frame):
 
 
 def draw_icon(canvas, name, color, ox=0, oy=0):
-    def l(points):
+    """Minimal line icons, intentionally close to the weight of SF Symbols."""
+    def l(points, width=1.7):
         coords = []
-        for i, v in enumerate(points):
-            coords.append(v + (ox if i % 2 == 0 else oy))
-        canvas.create_line(*coords, fill=color, width=1.5, capstyle="round", joinstyle="round")
-    def r(x, y, a, b):
-        canvas.create_rectangle(x+ox, y+oy, a+ox, b+oy, outline=color, width=1.3)
-    if name == "overview":
-        for x, y in [(3, 3), (13, 3), (3, 13), (13, 13)]:
-            r(x, y, x+6, y+6)
-    elif name in ("income", "expenses"):
-        if name == "income":
-            l([11, 3, 11, 20]); l([5, 14, 11, 20, 17, 14])
+        for i, value in enumerate(points):
+            coords.append(value + (ox if i % 2 == 0 else oy))
+        canvas.create_line(*coords, fill=color, width=width, capstyle="round",
+                           joinstyle="round")
+    def r(x, y, a, b, radius=False):
+        if radius:
+            canvas.create_oval(x+ox, y+oy, a+ox, b+oy, outline=color, width=1.6)
         else:
-            l([11, 20, 11, 3]); l([5, 9, 11, 3, 17, 9])
+            canvas.create_rectangle(x+ox, y+oy, a+ox, b+oy, outline=color, width=1.5)
+    if name == "overview":
+        r(3, 3, 9, 9); r(13, 3, 19, 9); r(3, 13, 9, 19); r(13, 13, 19, 19)
+    elif name == "income":
+        l([11, 3, 11, 19]); l([5, 13, 11, 19, 17, 13])
+    elif name == "expenses":
+        l([11, 19, 11, 3]); l([5, 9, 11, 3, 17, 9])
     elif name == "transfers":
-        l([3, 7, 20, 7, 16, 3]); l([20, 16, 3, 16, 7, 20])
+        l([3, 7, 19, 7, 15, 3]); l([19, 16, 3, 16, 7, 20])
     elif name == "savings":
-        l([4, 6, 11, 3, 19, 6, 19, 12, 16, 18, 11, 21, 6, 18, 4, 12, 4, 6])
+        l([4, 7, 11, 3, 18, 7, 18, 13, 15, 18, 11, 20, 7, 18, 4, 13, 4, 7])
         l([8, 11, 10, 14, 15, 9])
     elif name == "lending":
-        canvas.create_oval(6+ox, 2+oy, 15+ox, 11+oy, outline=color, width=1.4)
-        l([3, 21, 3, 18, 6, 15, 15, 15, 19, 18, 19, 21])
+        r(7, 2, 15, 10, True); l([3, 20, 3, 17, 7, 14, 15, 14, 19, 17, 19, 20])
     elif name == "settings":
         for y, x in [(5, 8), (11, 16), (18, 7)]:
-            l([3, y, 20, y])
-            r(x-2, y-2, x+2, y+2)
+            l([3, y, 20, y], 1.4); r(x-2, y-2, x+2, y+2, True)
     else:
         for y in (5, 11, 18):
-            l([7, y, 21, y]); l([2, y, 3, y])
+            l([7, y, 20, y], 1.5); l([2, y, 3, y], 2.2)
+
+
+class NavButton(tk.Canvas):
+    def __init__(self, parent, page, text, command):
+        self.page, self.text, self.command = page, text, command
+        self.active = False
+        self.hovered = False
+        super().__init__(parent, height=44, bg=parent.cget("bg"), bd=0,
+                         highlightthickness=0, takefocus=1)
+        safe_cursor(self, True)
+        self.bind("<Configure>", self._draw)
+        self.bind("<Enter>", lambda e: self.set_hover(True))
+        self.bind("<Leave>", lambda e: self.set_hover(False))
+        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Return>", lambda e: self.command())
+        self.bind("<space>", lambda e: self.command())
+
+    def set_active(self, value):
+        self.active = bool(value)
+        self._draw()
+
+    def set_hover(self, value):
+        self.hovered = bool(value)
+        self._draw()
+
+    def _draw(self, event=None):
+        if not self.winfo_exists():
+            return
+        self.delete("all")
+        w, h = max(2, self.winfo_width()), max(2, self.winfo_height())
+        if self.active or self.hovered:
+            rounded_rect(self, 4, 3, w-4, h-3, 11,
+                         fill=P["nav_active"] if self.active else P["nav_hover"])
+        if self.active:
+            rounded_rect(self, 4, 12, 7, h-12, 2, fill=P["accent"])
+        color = P["accent_dark"] if self.active else P["muted"]
+        draw_icon(self, self.page, color, ox=18, oy=11)
+        self.create_text(54, h/2, text=self.text, anchor="w",
+                         fill=P["text"] if self.active else P["muted"],
+                         font=font(13, self.active))
 
 
 class Modal(tk.Toplevel):
-    def __init__(self, app, title, subtitle="", width=660, height=660):
+    def __init__(self, app, title, subtitle="", width=680, height=680):
         super().__init__(app)
         self.app = app
         self.withdraw()
@@ -1356,20 +1458,22 @@ class Modal(tk.Toplevel):
         x = app.winfo_rootx() + max(0, (app.winfo_width() - actual_width)//2)
         y = app.winfo_rooty() + max(0, (app.winfo_height() - actual_height)//2)
         self.geometry(f"{actual_width}x{actual_height}+{x}+{y}")
-        self.minsize(460, 450)
+        self.minsize(480, 470)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         header = tk.Frame(self, bg=P["bg"])
-        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(26, 18))
-        label(header, title, 25, bold=True).pack(fill="x")
+        header.grid(row=0, column=0, sticky="ew", padx=32, pady=(29, 18))
+        label(header, title, 28, bold=True).pack(fill="x")
         if subtitle:
-            label(header, subtitle, 12, P["muted"], wraplength=width-70, justify="left").pack(fill="x", pady=(8, 0))
-        self.scroll = ScrollArea(self)
-        self.scroll.grid(row=1, column=0, sticky="nsew", padx=(26, 14))
+            label(header, subtitle, 13, P["muted"], wraplength=width-80,
+                  justify="left").pack(fill="x", pady=(8, 0))
+        self.scroll = ScrollArea(self, bg=P["bg"])
+        self.scroll.grid(row=1, column=0, sticky="nsew", padx=(32, 17))
         self.body = self.scroll.body
         self.footer = tk.Frame(self, bg=P["bg"])
-        self.footer.grid(row=2, column=0, sticky="ew", padx=28, pady=(12, 24))
-        self.error = label(self.footer, "", 12, P["red"], wraplength=width-70, justify="left")
+        self.footer.grid(row=2, column=0, sticky="ew", padx=32, pady=(12, 26))
+        self.error = label(self.footer, "", 12, P["red"], wraplength=width-80,
+                           justify="left")
         self.error.pack(fill="x", pady=(0, 12))
         self.buttons = tk.Frame(self.footer, bg=P["bg"])
         self.buttons.pack(fill="x")
@@ -1389,7 +1493,10 @@ class Modal(tk.Toplevel):
             self.error.configure(text="Saving is still in progress. Close this window after the result is confirmed.")
             return
         if getattr(self, "pending", None):
-            if not messagebox.askyesno("Unconfirmed save", "The last save was not confirmed. Refresh the history before entering it again. Close this form?", parent=self):
+            if not messagebox.askyesno(
+                    "Unconfirmed save",
+                    "The last save was not confirmed. Refresh the history before entering it again. Close this form?",
+                    parent=self):
                 return
         self.app.modals.discard(self)
         try:
@@ -1845,14 +1952,16 @@ class FinanceApp(tk.Tk):
             families = set(tkfont.families(self))
         except tk.TclError:
             families = set()
-        preferences = ("SF Pro Text", "Helvetica Neue", "Arial") if IS_MAC else ("Segoe UI", "DejaVu Sans", "Arial")
+        preferences = (("SF Pro Display", "SF Pro Text", "Helvetica Neue", "Arial")
+                       if IS_MAC else
+                       ("Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "Arial"))
         FONT_FAMILY = next((name for name in preferences if name in families), "TkDefaultFont")
-        self.title("Finance" + (" - DEMO" if demo else ""))
+        self.title("Finance" + (" — Demo" if demo else ""))
         self.configure(bg=P["bg"])
-        width = min(1440, self.winfo_screenwidth() - 60)
-        height = min(930, self.winfo_screenheight() - 85)
+        width = min(1480, max(1020, self.winfo_screenwidth() - 60))
+        height = min(950, max(680, self.winfo_screenheight() - 85))
         self.geometry(f"{width}x{height}+30+30")
-        self.minsize(min(980, width), min(640, height))
+        self.minsize(min(1020, width), min(680, height))
         self.demo = demo
         self.worker = Worker()
         self.repo = DemoRepository() if demo else None
@@ -1904,29 +2013,37 @@ class FinanceApp(tk.Tk):
         except tk.TclError as exc:
             write_diagnostic("Tk theme selection failed; using the active theme.", exc)
         style.configure("Finance.Treeview", background=P["card"], foreground=P["text"],
-                        fieldbackground=P["card"], borderwidth=0, relief="flat", rowheight=54, font=font(13))
-        style.configure("Finance.Treeview.Heading", background=P["card"], foreground=P["dim"],
-                        font=font(10, True), relief="flat", borderwidth=0, padding=(8, 14))
-        style.map("Finance.Treeview", background=[("selected", P["selection"])], foreground=[("selected", P["text"])])
-        style.map("Finance.Treeview.Heading", background=[("active", P["hover"])])
+                        fieldbackground=P["card"], borderwidth=0, relief="flat",
+                        rowheight=58, font=font(13))
+        style.configure("Finance.Treeview.Heading", background=P["surface"],
+                        foreground=P["dim"], font=font(10, True), relief="flat",
+                        borderwidth=0, padding=(10, 15))
+        style.map("Finance.Treeview",
+                  background=[("selected", P["selection"])],
+                  foreground=[("selected", P["white"])])
         style.layout("Finance.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.configure("Finance.TCombobox", fieldbackground=P["field"], background=P["field"],
                         foreground=P["text"], arrowcolor=P["muted"], bordercolor=P["border"],
-                        lightcolor=P["field"], darkcolor=P["field"], padding=(10, 4), insertcolor=P["text"])
-        style.map("Finance.TCombobox", fieldbackground=[("readonly", P["field"]), ("disabled", P["field"])],
+                        lightcolor=P["field"], darkcolor=P["field"], padding=(12, 7),
+                        insertcolor=P["text"], relief="flat")
+        style.map("Finance.TCombobox",
+                  fieldbackground=[("readonly", P["field"]), ("disabled", P["field"])],
                   foreground=[("readonly", P["text"]), ("disabled", P["dim"])],
-                  selectbackground=[("readonly", P["field"])], selectforeground=[("readonly", P["text"])],
-                  background=[("active", P["hover"]), ("readonly", P["field"])])
-        style.configure("Finance.Vertical.TScrollbar", troughcolor=P["bg"], background=P["border"],
-                        darkcolor=P["border"], lightcolor=P["border"], bordercolor=P["bg"],
-                        arrowcolor=P["muted"], gripcount=0, width=10)
+                  selectbackground=[("readonly", P["field"])],
+                  selectforeground=[("readonly", P["text"])],
+                  background=[("active", P["hover"]), ("readonly", P["field"])],
+                  bordercolor=[("focus", P["accent"]), ("!focus", P["border"])])
+        style.configure("Finance.Vertical.TScrollbar", troughcolor=P["bg"],
+                        background=P["border"], darkcolor=P["border"],
+                        lightcolor=P["border"], bordercolor=P["bg"],
+                        arrowcolor=P["dim"], gripcount=0, width=9)
         style.map("Finance.Vertical.TScrollbar",
-                  background=[("disabled", P["border"]), ("active", P["dim"]), ("!active", P["border"])],
-                  troughcolor=[("disabled", P["bg"]), ("!disabled", P["bg"])],
-                  arrowcolor=[("disabled", P["dim"]), ("!disabled", P["muted"])])
+                  background=[("active", P["muted"]), ("!active", P["border"])],
+                  troughcolor=[("!disabled", P["bg"])])
         self.option_add("*TCombobox*Listbox.background", P["field"])
         self.option_add("*TCombobox*Listbox.foreground", P["text"])
         self.option_add("*TCombobox*Listbox.selectBackground", P["selection"])
+        self.option_add("*TCombobox*Listbox.selectForeground", P["white"])
         self.option_add("*TCombobox*Listbox.font", font(14))
 
     def _wheel(self, event):
@@ -1966,10 +2083,14 @@ class FinanceApp(tk.Tk):
     def show_connecting(self):
         self.clear_root()
         area = tk.Frame(self, bg=P["bg"])
-        area.place(relx=.5, rely=.45, anchor="center")
-        label(area, "FINANCE", 12, P["accent"], True).pack()
-        label(area, "Your money. Clearly.", 34, bold=True).pack(pady=(18, 10))
-        label(area, "Opening your workspace...", 14, P["muted"]).pack()
+        area.place(relx=.5, rely=.46, anchor="center")
+        mark = tk.Canvas(area, width=64, height=64, bg=P["bg"], highlightthickness=0)
+        mark.pack()
+        rounded_rect(mark, 2, 2, 62, 62, 17, fill=P["accent"])
+        mark.create_line(20, 25, 44, 25, fill=P["white"], width=4, capstyle="round")
+        mark.create_line(20, 39, 38, 39, fill=P["white"], width=4, capstyle="round")
+        label(area, "Finance", 34, bold=True).pack(pady=(20, 7))
+        label(area, "Opening your private workspace…", 14, P["muted"]).pack()
 
     def startup(self):
         if self.demo:
@@ -1990,34 +2111,53 @@ class FinanceApp(tk.Tk):
     def show_setup(self, error_text=""):
         self.clear_root()
         outer = tk.Frame(self, bg=P["bg"])
-        # Aqua Tk can report a width of 1 during the first event-loop cycle.
-        # Never pass a negative or tiny width to place(), or a windowed app can
-        # appear to close without showing the setup screen.
         current_width = max(self.winfo_width(), self.winfo_reqwidth(), 680)
-        outer_width = min(620, max(380, current_width - 60))
+        outer_width = min(570, max(390, current_width - 70))
         outer.place(relx=.5, rely=.5, anchor="center", width=outer_width)
-        label(outer, "FINANCE  /  PERSONAL WORKSPACE", 11, P["accent"], True).pack(fill="x", pady=(0, 22))
-        label(outer, "Welcome back.", 36, bold=True).pack(fill="x")
-        label(outer, "One ledger. Every account.", 18, P["muted"]).pack(fill="x", pady=(10, 30))
-        box = card(outer)
+
+        brand = tk.Frame(outer, bg=P["bg"])
+        brand.pack(fill="x", pady=(0, 25))
+        mark = tk.Canvas(brand, width=48, height=48, bg=P["bg"], highlightthickness=0)
+        mark.pack(side="left", padx=(0, 14))
+        rounded_rect(mark, 1, 1, 47, 47, 13, fill=P["accent"])
+        mark.create_line(14, 19, 34, 19, fill=P["white"], width=3, capstyle="round")
+        mark.create_line(14, 30, 29, 30, fill=P["white"], width=3, capstyle="round")
+        brand_text = tk.Frame(brand, bg=P["bg"])
+        brand_text.pack(side="left", fill="x", expand=True)
+        label(brand_text, "Finance", 26, bold=True).pack(fill="x")
+        label(brand_text, "Personal ledger", 12, P["muted"]).pack(fill="x", pady=(2, 0))
+
+        label(outer, "Connect your workspace", 34, bold=True).pack(fill="x")
+        label(outer, "Use your own PostgreSQL connection. Existing records stay exactly where they are.",
+              14, P["muted"], wraplength=540, justify="left").pack(fill="x", pady=(10, 26))
+
+        box = card(outer, tone=P["card"])
         box.pack(fill="x")
         inside = tk.Frame(box, bg=P["card"])
-        inside.pack(fill="x", padx=26, pady=26)
-        label(inside, "Connect your database", 20, bold=True).pack(fill="x", pady=(0, 8))
-        label(inside, "Use the same Neon / PostgreSQL URL as your original app.\nYour existing records will be read, not replaced.", 13, P["muted"], justify="left", wraplength=520).pack(fill="x", pady=(0, 24))
-        self.url_field = Field(inside, "Database connection URL", secret=True)
+        inside.pack(fill="x", padx=25, pady=25)
+        self.url_field = Field(
+            inside, "PostgreSQL connection URL", secret=True,
+            hint="Each computer can keep its own saved database connection.")
         self.url_field.pack(fill="x")
         self.remember_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(inside, text="Remember securely on this computer", variable=self.remember_var,
-                       font=font(12), bg=P["card"], fg=P["muted"], activebackground=P["card"],
-                       activeforeground=P["text"], selectcolor=P["field"], relief="flat", bd=0,
-                       highlightthickness=0).pack(anchor="w", pady=(15, 4))
-        self.setup_error = label(inside, error_text, 12, P["red"], wraplength=520, justify="left")
-        self.setup_error.pack(fill="x", pady=(8, 16))
-        self.connect_button = Button(inside, "Connect workspace", lambda: self.connect(self.url_field.get(), self.remember_var.get()), width=200)
-        self.connect_button.pack(anchor="w")
-        label(outer, "No new account. No web hosting. The database keeps your Mac and Windows records in sync.", 12, P["dim"], wraplength=570, justify="left").pack(fill="x", pady=(18, 0))
-        self.url_field.input.bind("<Return>", lambda e: self.connect(self.url_field.get(), self.remember_var.get()))
+        tk.Checkbutton(
+            inside, text="Remember securely on this computer",
+            variable=self.remember_var, font=font(12), bg=P["card"], fg=P["muted"],
+            activebackground=P["card"], activeforeground=P["text"],
+            selectcolor=P["field"], relief="flat", bd=0,
+            highlightthickness=0).pack(anchor="w", pady=(16, 2))
+        self.setup_error = label(inside, error_text, 12, P["red"],
+                                 wraplength=500, justify="left")
+        self.setup_error.pack(fill="x", pady=(10, 14))
+        self.connect_button = Button(
+            inside, "Connect", lambda: self.connect(
+                self.url_field.get(), self.remember_var.get()), height=44)
+        self.connect_button.pack(fill="x")
+        label(outer, "Encrypted connection • local credentials • no shared app account",
+              11, P["dim"], wraplength=540, justify="left").pack(fill="x", pady=(16, 0))
+        self.url_field.input.bind(
+            "<Return>", lambda e: self.connect(
+                self.url_field.get(), self.remember_var.get()))
         self.url_field.input.focus_set()
 
     def connect(self, url, remember=True):
@@ -2069,61 +2209,68 @@ class FinanceApp(tk.Tk):
 
     def build_shell(self):
         self.clear_root()
-        self.sidebar = tk.Frame(self, bg=P["sidebar"], width=214)
+        self.sidebar = tk.Frame(self, bg=P["sidebar"], width=226)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
+
         logo = tk.Frame(self.sidebar, bg=P["sidebar"])
-        logo.pack(fill="x", padx=24, pady=(24, 6))
-        mark = tk.Canvas(logo, width=28, height=27, bg=P["sidebar"], highlightthickness=0)
-        mark.pack(side="left", padx=(0, 10))
-        mark.create_rectangle(2, 3, 11, 12, fill=P["accent"], outline="")
-        mark.create_rectangle(14, 3, 23, 12, fill="#766B8E", outline="")
-        mark.create_rectangle(2, 15, 11, 24, fill="#766B8E", outline="")
-        mark.create_rectangle(14, 15, 23, 24, fill=P["accent"], outline="")
-        label(logo, "Finance", 23, bold=True).pack(side="left")
-        label(self.sidebar, "PERSONAL WORKSPACE", 9, P["dim"], True).pack(anchor="w", padx=24, pady=(4, 26))
+        logo.pack(fill="x", padx=22, pady=(22, 19))
+        mark = tk.Canvas(logo, width=34, height=34, bg=P["sidebar"], highlightthickness=0)
+        mark.pack(side="left", padx=(0, 11))
+        rounded_rect(mark, 1, 1, 33, 33, 9, fill=P["accent"])
+        mark.create_line(10, 13, 24, 13, fill=P["white"], width=2.5, capstyle="round")
+        mark.create_line(10, 21, 20, 21, fill=P["white"], width=2.5, capstyle="round")
+        label(logo, "Finance", 21, bold=True).pack(side="left")
+
         self.nav = {}
+        nav_host = tk.Frame(self.sidebar, bg=P["sidebar"])
+        nav_host.pack(fill="x", padx=10)
         for page, name in self.PAGES:
             if page == "activity":
-                tk.Frame(self.sidebar, bg=P["border"], height=1).pack(fill="x", padx=24, pady=(12, 8))
-            row = tk.Frame(self.sidebar, bg=P["sidebar"], height=40)
-            row.pack(fill="x", padx=12, pady=2)
-            row.pack_propagate(False)
-            icon = tk.Canvas(row, bg=P["sidebar"], width=25, height=25, highlightthickness=0)
-            icon.pack(side="left", padx=(14, 13))
-            draw_icon(icon, page, P["muted"])
-            title = label(row, name, 13, P["muted"])
-            title.pack(side="left")
-            for widget in (row, icon, title):
-                safe_cursor(widget, True)
-                widget.bind("<Button-1>", lambda e, p=page: self.navigate(p))
-                widget.bind("<Enter>", lambda e, p=page: self.nav_hover(p, True))
-                widget.bind("<Leave>", lambda e, p=page: self.nav_hover(p, False))
-            self.nav[page] = (row, icon, title)
+                tk.Frame(nav_host, bg=P["hairline"], height=1).pack(
+                    fill="x", padx=14, pady=(11, 8))
+            button = NavButton(nav_host, page, name,
+                               lambda p=page: self.navigate(p))
+            button.pack(fill="x", pady=1)
+            self.nav[page] = button
+
         bottom = tk.Frame(self.sidebar, bg=P["sidebar"])
-        bottom.pack(side="bottom", fill="x", padx=22, pady=20)
-        self.sync_title = label(bottom, "", 12, P["green"], True)
-        self.sync_title.pack(fill="x")
-        self.sync_detail = label(bottom, "", 11, P["dim"], wraplength=170, justify="left")
-        self.sync_detail.pack(fill="x", pady=(6, 15))
-        Button(bottom, "Refresh", self.refresh, variant="secondary", width=166, height=35, small=True).pack(fill="x")
-        label(bottom, "v" + APP_VERSION + ("  /  DEMO" if self.demo else "  /  Desktop"), 10, P["dim"]).pack(fill="x", pady=(18, 0))
+        bottom.pack(side="bottom", fill="x", padx=16, pady=16)
+        status = card(bottom, tone=P["surface"], border=False)
+        status.pack(fill="x", pady=(0, 10))
+        status_inner = tk.Frame(status, bg=P["surface"])
+        status_inner.pack(fill="x", padx=13, pady=12)
+        top = tk.Frame(status_inner, bg=P["surface"])
+        top.pack(fill="x")
+        self.sync_dot = tk.Canvas(top, width=10, height=10, bg=P["surface"],
+                                  highlightthickness=0)
+        self.sync_dot.pack(side="left", padx=(0, 8))
+        self.sync_dot_item = self.sync_dot.create_oval(2, 2, 8, 8,
+                                                       fill=P["green"], outline="")
+        self.sync_title = label(top, "", 12, P["green"], True, bg=P["surface"])
+        self.sync_title.pack(side="left")
+        self.sync_detail = label(status_inner, "", 10, P["dim"], bg=P["surface"],
+                                 wraplength=166, justify="left")
+        self.sync_detail.pack(fill="x", pady=(6, 0))
+        Button(bottom, "Refresh", self.refresh, variant="secondary",
+               width=194, height=36, small=True).pack(fill="x")
+        label(bottom, "Version " + APP_VERSION + (" • Demo" if self.demo else ""),
+              9, P["dim"]).pack(fill="x", pady=(12, 0))
+
         self.main = tk.Frame(self, bg=P["bg"])
         self.main.pack(side="left", fill="both", expand=True)
-        self.toast_label = label(self.main, "", 12, P["green"], wraplength=900, justify="left")
-        self.toast_label.pack(side="bottom", fill="x", padx=30, pady=(0, 9))
+        self.toast_label = label(self.main, "", 12, P["green"],
+                                 wraplength=980, justify="left")
+        self.toast_label.pack(side="bottom", fill="x", padx=34, pady=(0, 9))
         self.content = tk.Frame(self.main, bg=P["bg"])
         self.content.pack(fill="both", expand=True)
         self.render()
         self.update_status()
 
     def nav_hover(self, page, hovered):
-        if page == self.current_page:
-            return
-        row, icon, title = self.nav[page]
-        background = P["bg"] if hovered else P["sidebar"]
-        for widget in (row, icon, title):
-            widget.configure(bg=background)
+        button = self.nav.get(page)
+        if button:
+            button.set_hover(hovered)
 
     def navigate(self, page):
         if self.modals:
@@ -2138,24 +2285,27 @@ class FinanceApp(tk.Tk):
         if not hasattr(self, "sync_title") or not self.sync_title.winfo_exists():
             return
         if self.demo:
-            title, color, detail = "Demo workspace", P["amber"], "Sample data only.\nNothing is saved online."
+            title, color, detail = "Demo", P["amber"], "Sample data only"
         elif self.busy_write:
-            title, color, detail = "Saving...", P["amber"], "Waiting for database confirmation."
+            title, color, detail = "Saving", P["amber"], "Waiting for confirmation"
         elif self.fetching:
-            title, color, detail = "Refreshing...", P["muted"], "Keeping the last loaded balances."
+            title, color, detail = "Refreshing", P["muted"], "Keeping the last snapshot"
         elif not self.online:
-            title, color, detail = "Offline / read only", P["red"], "Showing cached data.\nRefresh to reconnect."
+            title, color, detail = "Offline", P["red"], "Read-only cached data"
         elif not self.snapshot.valid:
-            title, color, detail = "Review required", P["amber"], "Open Settings for data checks."
+            title, color, detail = "Review needed", P["amber"], "Open Data checks"
         else:
             title, color = "Connected", P["green"]
             try:
-                stamp = datetime.fromisoformat(self.snapshot.fetched_at).astimezone().strftime("%H:%M:%S")
+                stamp = datetime.fromisoformat(
+                    self.snapshot.fetched_at).astimezone().strftime("%H:%M")
             except ValueError:
                 stamp = "earlier"
-            detail = "Last synced " + stamp
+            detail = "Synced at " + stamp
         self.sync_title.configure(text=title, fg=color)
         self.sync_detail.configure(text=detail)
+        if hasattr(self, "sync_dot") and self.sync_dot.winfo_exists():
+            self.sync_dot.itemconfigure(self.sync_dot_item, fill=color)
 
     def can_write(self):
         return bool(self.repo and self.online and self.has_snapshot and self.snapshot.valid and not self.busy_write)
@@ -2217,15 +2367,8 @@ class FinanceApp(tk.Tk):
         self._table_context = None
         for widget in self.content.winfo_children():
             widget.destroy()
-        for page, (row, icon, title) in self.nav.items():
-            active = page == self.current_page
-            bg = "#24232E" if active else P["sidebar"]
-            color = P["accent"] if active else P["muted"]
-            for widget in (row, icon, title):
-                widget.configure(bg=bg)
-            title.configure(fg=color, font=font(13, active))
-            icon.delete("all")
-            draw_icon(icon, page, color)
+        for page, button in self.nav.items():
+            button.set_active(page == self.current_page)
         if self.current_page == "settings":
             self.render_settings()
         else:
@@ -2233,42 +2376,53 @@ class FinanceApp(tk.Tk):
 
     def page_header(self, title, subtitle, actions=()):
         header = tk.Frame(self.content, bg=P["bg"])
-        header.pack(fill="x", padx=30, pady=(30, 23))
+        header.pack(fill="x", padx=34, pady=(30, 22))
         right = tk.Frame(header, bg=P["bg"])
-        right.pack(side="right", anchor="n", pady=(5, 0))
+        right.pack(side="right", anchor="n", pady=(4, 0))
         for text, command, variant in actions:
-            button = Button(right, text, command, variant=variant)
-            button.pack(side="left", padx=(10, 0))
+            button = Button(right, text, command, variant=variant, height=40)
+            button.pack(side="left", padx=(9, 0))
         left = tk.Frame(header, bg=P["bg"])
         left.pack(side="left", fill="x", expand=True)
-        label(left, title, 30, bold=True).pack(fill="x")
-        label(left, subtitle, 12, P["muted"], wraplength=550, justify="left").pack(fill="x", pady=(8, 0))
+        label(left, title, 32, bold=True).pack(fill="x")
+        label(left, subtitle, 13, P["muted"], wraplength=650,
+              justify="left").pack(fill="x", pady=(7, 0))
 
     def page_body(self):
         scroll = ScrollArea(self.content)
-        scroll.pack(fill="both", expand=True, padx=(30, 15))
+        scroll.pack(fill="both", expand=True, padx=(34, 17))
         body = tk.Frame(scroll.body, bg=P["bg"])
-        body.pack(fill="x", padx=(0, 14), pady=(0, 20))
+        body.pack(fill="x", padx=(0, 17), pady=(0, 26))
         self.page_scroll = scroll
         return body
 
     def notice(self, parent, text, color=None):
-        box = card(parent)
+        accent = color or P["amber"]
+        box = card(parent, tone=P["surface"], border=False)
         box.pack(fill="x", pady=(0, 18))
-        label(box, text, 12, color or P["amber"], wraplength=930, justify="left").pack(fill="x", padx=17, pady=14)
-        box.bind("<Configure>", lambda e: [child.configure(wraplength=max(240, e.width-40)) for child in box.winfo_children() if isinstance(child, tk.Label)])
+        stripe = tk.Frame(box, bg=accent, width=3)
+        stripe.pack(side="left", fill="y")
+        message = label(box, text, 12, P["text"], bg=P["surface"],
+                        wraplength=930, justify="left")
+        message.pack(side="left", fill="x", expand=True, padx=16, pady=14)
+        box.bind("<Configure>", lambda e: message.configure(
+            wraplength=max(240, e.width-50)))
 
-    def month_bar(self, parent, title="Monthly overview"):
+    def month_bar(self, parent, title="This month"):
         row = tk.Frame(parent, bg=P["bg"])
-        row.pack(fill="x", pady=(5, 16))
-        label(row, title, 17, bold=True).pack(side="left")
-        chooser = tk.Frame(row, bg=P["bg"])
+        row.pack(fill="x", pady=(7, 15))
+        label(row, title, 19, bold=True).pack(side="left")
+        chooser = card(row, tone=P["surface"], border=False)
         chooser.pack(side="right")
-        Button(chooser, "<", lambda: self.change_month(-1), variant="secondary", width=32, height=30, small=True).pack(side="left")
+        Button(chooser, "‹", lambda: self.change_month(-1), variant="ghost",
+               width=34, height=32, small=True).pack(side="left", padx=(3, 0), pady=3)
         current = datetime.strptime(self.selected_month, "%Y-%m")
-        label(chooser, current.strftime("%B %Y"), 12, P["muted"], width=17, anchor="center").pack(side="left", padx=5)
-        Button(chooser, ">", lambda: self.change_month(1), variant="secondary", width=32, height=30, small=True).pack(side="left")
-        Button(chooser, "Today", self.today, variant="secondary", height=30, small=True).pack(side="left", padx=(8, 0))
+        label(chooser, current.strftime("%B %Y"), 12, P["text"], True,
+              bg=P["surface"], width=16, anchor="center").pack(side="left", padx=2)
+        Button(chooser, "›", lambda: self.change_month(1), variant="ghost",
+               width=34, height=32, small=True).pack(side="left", padx=(0, 3), pady=3)
+        Button(row, "Today", self.today, variant="secondary", height=34,
+               small=True).pack(side="right", padx=(0, 9))
 
     def today(self):
         self.selected_month = date.today().strftime("%Y-%m")
@@ -2295,128 +2449,204 @@ class FinanceApp(tk.Tk):
         DisplayRatesDialog(self)
 
     def dinar_total_card(self, parent):
-        box = card(parent)
-        box.pack(fill="x", pady=(0, 22))
-        inner = tk.Frame(box, bg=P["card"])
-        inner.pack(fill="x", padx=22, pady=18)
-        top = tk.Frame(inner, bg=P["card"])
-        top.pack(fill="x")
-        label(top, "TOTAL IN DINARS", 11, P["accent"], True).pack(side="left")
-        Button(top, "Display rates", self.open_display_rates, variant="secondary",
-               height=30, small=True).pack(side="right")
+        box = card(parent, tone=P["hero"], border_color=P["hero_border"])
+        box.pack(fill="x", pady=(0, 24))
+        inner = tk.Frame(box, bg=P["hero"])
+        inner.pack(fill="x", padx=25, pady=23)
+        inner.grid_columnconfigure(0, weight=3)
+        inner.grid_columnconfigure(1, weight=2, minsize=280)
+
+        left = tk.Frame(inner, bg=P["hero"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 28))
+        label(left, "Estimated total balance", 13, P["cyan"], True,
+              bg=P["hero"]).pack(fill="x")
         total = total_in_dinars(self.snapshot)
-        rates = display_rates(self.snapshot.settings)
         if not self.snapshot.valid:
             text = "Unavailable"
         elif total is None:
             text = "Set display rates"
         else:
-            text = "\u2248 " + fmt(total, "DZD")
-        self.dinar_total_label = label(inner, text, 34 if len(text) <= 25 else 26,
-                                       P["red"] if total is not None and total < ZERO else P["text"], True)
-        self.dinar_total_label.pack(fill="x", pady=(4, 8))
-        note = label(inner, "Bank + cash + savings. Unpaid loans are excluded. Current balances, not just this month.",
-                     12, P["muted"], wraplength=880, justify="left")
-        note.pack(fill="x")
-        quotes = "    /    ".join(f"1 {currency} = {compact_rate(rates[currency])} DZD" if rates[currency] is not None
-                                  else f"{currency} rate not set" for currency in DISPLAY_RATE_KEYS)
-        self.dinar_rates_label = label(inner, quotes + "    /    Display estimate only", 11, P["dim"],
-                                       wraplength=880, justify="left")
-        self.dinar_rates_label.pack(fill="x", pady=(8, 0))
-        def wrap(event):
-            width = max(220, event.width)
-            note.configure(wraplength=width)
-            self.dinar_rates_label.configure(wraplength=width)
-        inner.bind("<Configure>", wrap)
+            text = fmt(total, "DZD")
+        self.dinar_total_label = label(
+            left, text, 39 if len(text) <= 25 else 31,
+            P["red"] if total is not None and total < ZERO else P["text"],
+            True, bg=P["hero"])
+        self.dinar_total_label.pack(fill="x", pady=(7, 8))
+        label(left, "Available money and savings across every account. Outstanding loans are shown separately.",
+              12, P["muted"], bg=P["hero"], wraplength=620,
+              justify="left").pack(fill="x")
+        Button(left, "Edit display rates", self.open_display_rates,
+               variant="secondary", height=34, small=True).pack(anchor="w", pady=(18, 0))
+
+        right = tk.Frame(inner, bg=P["hero"])
+        right.grid(row=0, column=1, sticky="nsew")
+        label(right, "Held by currency", 12, P["muted"], True,
+              bg=P["hero"]).pack(fill="x", pady=(1, 10))
+        totals = self.snapshot.currency_totals()
+        for index, currency in enumerate(CURRENCIES):
+            row = tk.Frame(right, bg=P["hero"])
+            row.pack(fill="x", pady=(0, 10))
+            dot = tk.Canvas(row, width=10, height=10, bg=P["hero"],
+                            highlightthickness=0)
+            dot.pack(side="left", padx=(0, 9))
+            color = {"USD": ACCOUNTS["usd_bank"].accent,
+                     "EUR": ACCOUNTS["eur_bank"].accent,
+                     "DZD": ACCOUNTS["dzd_cash"].accent}[currency]
+            dot.create_oval(2, 2, 8, 8, fill=color, outline="")
+            label(row, currency, 12, P["muted"], bg=P["hero"]).pack(side="left")
+            label(row, fmt(totals[currency], currency) if self.snapshot.valid else "—",
+                  13, P["text"], True, bg=P["hero"]).pack(side="right")
+        rates = display_rates(self.snapshot.settings)
+        quotes = "  •  ".join(
+            f"1 {currency} = {compact_rate(rates[currency])} DZD"
+            if rates[currency] is not None else f"{currency} rate not set"
+            for currency in DISPLAY_RATE_KEYS)
+        self.dinar_rates_label = label(
+            right, quotes, 10, P["dim"], bg=P["hero"],
+            wraplength=320, justify="left")
+        self.dinar_rates_label.pack(fill="x", pady=(5, 0))
 
     def account_cards(self, parent, mode="available"):
         grid = tk.Frame(parent, bg=P["bg"])
-        grid.pack(fill="x", pady=(0, 22))
+        grid.pack(fill="x", pady=(0, 24))
         widgets = []
+        symbols = {"usd_bank": "$", "eur_bank": "€",
+                   "eur_cash": "€", "dzd_cash": "DA"}
         for key, account in ACCOUNTS.items():
-            box = card(grid)
+            box = card(grid, tone=P["card"])
             inside = tk.Frame(box, bg=P["card"])
-            inside.pack(fill="both", expand=True, padx=20, pady=19)
+            inside.pack(fill="both", expand=True, padx=19, pady=18)
+
             top = tk.Frame(inside, bg=P["card"])
-            top.pack(fill="x", pady=(0, 19))
-            label(top, account.currency, 11, account.accent, True).pack(side="left")
-            label(top, account.location.upper(), 9, P["dim"], True).pack(side="right")
-            value = (self.snapshot.saved if mode == "saved" else self.snapshot.available)[key]
+            top.pack(fill="x")
+            icon = tk.Canvas(top, width=36, height=36, bg=P["card"],
+                             highlightthickness=0)
+            icon.pack(side="left", padx=(0, 11))
+            rounded_rect(icon, 1, 1, 35, 35, 10, fill=P["surface"],
+                         outline=account.accent)
+            icon.create_text(18, 18, text=symbols[key], fill=account.accent,
+                             font=font(12, True))
+            names = tk.Frame(top, bg=P["card"])
+            names.pack(side="left", fill="x", expand=True)
+            label(names, account.name, 13, P["text"], True,
+                  bg=P["card"]).pack(fill="x")
+            label(names, account.location, 10, P["dim"],
+                  bg=P["card"]).pack(fill="x", pady=(2, 0))
+
+            value = (self.snapshot.saved if mode == "saved" else
+                     self.snapshot.available)[key]
             text = fmt(value, account.currency) if self.snapshot.valid else "Unavailable"
             size = 27 if len(text) < 15 else 22
-            label(inside, text, size, P["red"] if value < ZERO else P["text"], True).pack(fill="x")
+            label(inside, text, size, P["red"] if value < ZERO else P["text"],
+                  True, bg=P["card"]).pack(fill="x", pady=(20, 5))
+            primary_caption = "Saved" if mode == "saved" else "Available"
+            label(inside, primary_caption, 10, P["dim"], bg=P["card"]).pack(fill="x")
+            tk.Frame(inside, bg=P["hairline"], height=1).pack(fill="x", pady=(16, 12))
             if mode == "saved":
-                note = f"{fmt(self.snapshot.available[key], account.currency)} available"
+                bottom_text = f"Available  {fmt(self.snapshot.available[key], account.currency)}"
             else:
-                note = "Available" + ("  /  " + fmt(self.snapshot.saved[key], account.currency) + " saved" if self.snapshot.saved[key] else " balance")
-            label(inside, note if self.snapshot.valid else "Review data checks", 10, P["dim"], wraplength=220, justify="left").pack(fill="x", pady=(12, 0))
+                held = self.snapshot.available[key] + self.snapshot.saved[key]
+                bottom_text = (f"Saved  {fmt(self.snapshot.saved[key], account.currency)}"
+                               if self.snapshot.saved[key] else
+                               f"Total held  {fmt(held, account.currency)}")
+            label(inside, bottom_text if self.snapshot.valid else "Review data checks",
+                  11, P["muted"], bg=P["card"], wraplength=220,
+                  justify="left").pack(fill="x")
             widgets.append(box)
+
         last_cols = [0]
         def arrange(event):
-            columns = 4 if event.width >= 940 else 2
+            columns = 4 if event.width >= 990 else 2
             if columns == last_cols[0]:
                 return
             last_cols[0] = columns
             for c in range(4):
-                grid.grid_columnconfigure(c, weight=1 if c < columns else 0, uniform="accounts" if c < columns else "")
+                grid.grid_columnconfigure(c, weight=1 if c < columns else 0,
+                                          uniform="accounts" if c < columns else "")
             for i, box in enumerate(widgets):
-                box.grid(row=i//columns, column=i % columns, sticky="nsew", padx=(0 if i % columns == 0 else 6, 0 if i % columns == columns-1 else 6), pady=(0, 12 if columns == 2 and i < 2 else 0))
+                box.grid(row=i//columns, column=i % columns, sticky="nsew",
+                         padx=(0 if i % columns == 0 else 6,
+                               0 if i % columns == columns-1 else 6),
+                         pady=(0, 12 if columns == 2 and i < len(widgets)-2 else 0))
         grid.bind("<Configure>", arrange)
-        # Initial geometry must be established before its first Configure event.
         for i, box in enumerate(widgets):
-            box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0 if i == 3 else 6))
+            box.grid(row=0, column=i, sticky="nsew",
+                     padx=(0 if i == 0 else 6, 0 if i == 3 else 6))
             grid.grid_columnconfigure(i, weight=1, uniform="accounts")
 
     def triple_summary(self, parent, title, totals, color=None):
-        box = card(parent)
-        label(box, title.upper(), 10, P["dim"], True).pack(fill="x", padx=20, pady=(17, 13))
+        accent = color or P["text"]
+        box = card(parent, tone=P["card"])
+        header = tk.Frame(box, bg=P["card"])
+        header.pack(fill="x", padx=19, pady=(17, 13))
+        dot = tk.Canvas(header, width=10, height=10, bg=P["card"],
+                        highlightthickness=0)
+        dot.pack(side="left", padx=(0, 8))
+        dot.create_oval(2, 2, 8, 8, fill=accent, outline="")
+        label(header, title, 13, P["text"], True,
+              bg=P["card"]).pack(side="left")
         for currency in CURRENCIES:
             row = tk.Frame(box, bg=P["card"])
-            row.pack(fill="x", padx=20, pady=(0, 9))
-            label(row, currency, 11, P["muted"]).pack(side="left")
+            row.pack(fill="x", padx=19, pady=(0, 10))
+            label(row, currency, 11, P["dim"], bg=P["card"]).pack(side="left")
             value = totals[currency]
-            label(row, fmt(value, currency) if self.snapshot.valid else "--", 15,
-                  P["red"] if value < ZERO else color or P["text"], True).pack(side="right")
+            label(row, fmt(value, currency) if self.snapshot.valid else "—", 15,
+                  P["red"] if value < ZERO else accent, True,
+                  bg=P["card"]).pack(side="right")
         tk.Frame(box, height=7, bg=P["card"]).pack()
         return box
 
     def render_page(self):
         page = self.current_page
         configurations = {
-            "overview": ("Overview", "A clear view of your money, wherever you keep it.",
-                         [("+ Income", lambda: self.open_form("income"), "primary"), ("Add expense", lambda: self.open_form("expense"), "secondary")]),
-            "income": ("Income", "Record what you actually received. Nothing else to calculate.", [("+ Record income", lambda: self.open_form("income"), "primary")]),
-            "expenses": ("Expenses", "Know what left your accounts and where it went.", [("+ Record expense", lambda: self.open_form("expense"), "primary")]),
-            "transfers": ("Transfers", "Any currency. Any direction. Bank and cash, kept separate.", [("+ New transfer", lambda: self.open_form("transfer"), "primary")]),
-            "savings": ("Savings", "Money set aside, still tracked in its original account.", [("Add to savings", lambda: self.open_form("savings_deposit"), "primary"), ("Release", lambda: self.open_form("savings_withdraw"), "secondary")]),
-            "lending": ("Lending", "Keep track of who owes you and every repayment.", [("+ Record loan", lambda: self.open_form("loan_out"), "primary")]),
-            "activity": ("All activity", "Search your history. Open any record to review or correct it.", [("Export CSV", self.export_csv, "secondary")])}
+            "overview": ("Overview", "A calm view of everything you hold.",
+                         [("Add income", lambda: self.open_form("income"), "primary"),
+                          ("Add expense", lambda: self.open_form("expense"), "secondary")]),
+            "income": ("Income", "Record the amount that actually reached you.",
+                       [("New income", lambda: self.open_form("income"), "primary")]),
+            "expenses": ("Expenses", "Keep every outgoing payment tied to its account.",
+                         [("New expense", lambda: self.open_form("expense"), "primary")]),
+            "transfers": ("Transfers", "Move money between any bank, cash or currency account.",
+                          [("New transfer", lambda: self.open_form("transfer"), "primary")]),
+            "savings": ("Savings", "Set money aside without losing track of where it is held.",
+                        [("Add savings", lambda: self.open_form("savings_deposit"), "primary"),
+                         ("Release", lambda: self.open_form("savings_withdraw"), "secondary")]),
+            "lending": ("Lending", "See what is owed and record each repayment.",
+                        [("New loan", lambda: self.open_form("loan_out"), "primary")]),
+            "activity": ("Activity", "Search, review and correct your complete ledger.",
+                         [("Export CSV", self.export_csv, "secondary")])}
         self.page_header(*configurations[page])
         body = self.page_body()
         if self.demo:
-            self.notice(body, "DEMO WORKSPACE  /  These are sample transactions. Changes here never touch your database.", P["accent"])
+            self.notice(body, "Demo workspace — these sample transactions never touch a database.", P["purple"])
         if not self.online:
-            self.notice(body, "OFFLINE SNAPSHOT  /  These balances may be out of date. Refresh to reconnect; new changes are disabled.", P["red"])
+            self.notice(body, "Offline snapshot — balances may be out of date and changes are disabled.", P["red"])
         if self.snapshot.errors:
-            self.notice(body, "BALANCES UNAVAILABLE  /  " + self.snapshot.errors[0] + "  Open Settings for the full data checks.", P["red"])
+            self.notice(body, "Balances are unavailable until the ledger issue is reviewed in Settings.", P["red"])
         elif self.snapshot.legacy_pending != ZERO and page == "overview":
-            self.notice(body, f"UPGRADE NOTE  /  Your old pending USD balance ({fmt(self.snapshot.legacy_pending, 'USD')}) is now included in USD bank. No money was moved. Review that total before using it as a bank balance.")
+            self.notice(body, f"Your former pending USD balance ({fmt(self.snapshot.legacy_pending, 'USD')}) is included in USD bank. Review that total once after upgrading.", P["amber"])
+
         if page == "overview":
             self.dinar_total_card(body)
             heading = tk.Frame(body, bg=P["bg"])
-            heading.pack(fill="x", pady=(0, 12))
-            label(heading, "Your accounts", 17, bold=True).pack(side="left")
-            label(heading, "CURRENT AVAILABLE BALANCES", 9, P["dim"], True).pack(side="right")
+            heading.pack(fill="x", pady=(0, 13))
+            label(heading, "Accounts", 19, bold=True).pack(side="left")
+            label(heading, "AVAILABLE NOW", 9, P["dim"], True).pack(side="right")
             self.account_cards(body)
-            self.month_bar(body)
+            self.month_bar(body, "Monthly activity")
             inc = self.snapshot.monthly(self.selected_month, "income")
             exp = self.snapshot.monthly(self.selected_month, "expense")
             net = {c: inc[c]-exp[c] for c in CURRENCIES}
             stats = tk.Frame(body, bg=P["bg"])
-            stats.pack(fill="x", pady=(0, 26))
-            for i, (name, values, color) in enumerate([("Income", inc, P["green"]), ("Expenses", exp, P["red"]), ("Income minus expenses", net, P["text"])]):
+            stats.pack(fill="x", pady=(0, 27))
+            for i, (name, values, color) in enumerate([
+                    ("Income", inc, P["green"]),
+                    ("Expenses", exp, P["red"]),
+                    ("Net cash flow", net, P["accent_dark"])]):
                 stats.grid_columnconfigure(i, weight=1, uniform="stats")
-                self.triple_summary(stats, name, values, color).grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0 if i == 2 else 6))
+                self.triple_summary(stats, name, values, color).grid(
+                    row=0, column=i, sticky="nsew",
+                    padx=(0 if i == 0 else 6, 0 if i == 2 else 6))
             self.activity_table(body, allowed=None, selected_month=True, compact=True)
         elif page in ("income", "expenses"):
             self.month_bar(body, "Monthly income" if page == "income" else "Monthly expenses")
@@ -2424,109 +2654,249 @@ class FinanceApp(tk.Tk):
             totals = self.snapshot.monthly(self.selected_month, kind)
             row = tk.Frame(body, bg=P["bg"])
             row.pack(fill="x", pady=(0, 25))
-            for i, c in enumerate(CURRENCIES):
+            for i, currency in enumerate(CURRENCIES):
                 row.grid_columnconfigure(i, weight=1, uniform="currency")
-                box = card(row)
-                box.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 7, 0 if i == 2 else 7))
-                label(box, c + "  /  " + ("RECEIVED" if kind == "income" else "SPENT"), 10, P["dim"], True).pack(fill="x", padx=20, pady=(20, 12))
-                label(box, fmt(totals[c], c) if self.snapshot.valid else "--", 27, P["green"] if kind == "income" else P["red"], True).pack(fill="x", padx=20, pady=(0, 22))
+                box = card(row, tone=P["card"])
+                box.grid(row=0, column=i, sticky="ew",
+                         padx=(0 if i == 0 else 7, 0 if i == 2 else 7))
+                color = P["green"] if kind == "income" else P["red"]
+                label(box, currency, 11, P["dim"], True,
+                      bg=P["card"]).pack(fill="x", padx=20, pady=(19, 10))
+                label(box, fmt(totals[currency], currency) if self.snapshot.valid else "—",
+                      28, color, True, bg=P["card"]).pack(fill="x", padx=20)
+                label(box, "Received" if kind == "income" else "Spent", 10,
+                      P["muted"], bg=P["card"]).pack(fill="x", padx=20,
+                                                     pady=(6, 19))
             self.activity_table(body, allowed={kind}, selected_month=True)
         elif page == "transfers":
-            info = card(body)
+            info = card(body, tone=P["surface"], border=False)
             info.pack(fill="x", pady=(0, 24))
-            inside = tk.Frame(info, bg=P["card"])
-            inside.pack(fill="x", padx=22, pady=22)
-            label(inside, "You send  \u2192  You receive", 21, bold=True).pack(fill="x")
-            label(inside, "USD, EUR and DZD in every direction. Move euros between bank and cash without mixing their balances. The exchange rate is calculated from the actual amounts, not entered manually.", 13, P["muted"], wraplength=870, justify="left").pack(fill="x", pady=(10, 0))
+            inside = tk.Frame(info, bg=P["surface"])
+            inside.pack(fill="x", padx=22, pady=20)
+            label(inside, "You send  →  You receive", 19, bold=True,
+                  bg=P["surface"]).pack(fill="x")
+            label(inside, "Enter the actual amount on each side. The effective rate appears automatically, including bank-to-cash moves in the same currency.",
+                  13, P["muted"], bg=P["surface"], wraplength=900,
+                  justify="left").pack(fill="x", pady=(8, 0))
             self.activity_table(body, allowed={"transfer", "adjustment"})
         elif page == "savings":
             self.account_cards(body, mode="saved")
-            self.notice(body, "Savings are reserved inside each account, not an extra bank balance. Total held = available + saved. EUR bank savings and EUR cash savings stay separate.", P["muted"])
+            self.notice(body, "Savings remain inside their original account. Available plus saved equals the total held in that account.", P["accent_dark"])
             self.activity_table(body, allowed={"savings_deposit", "savings_withdraw"})
         elif page == "lending":
             self.render_loans(body)
         else:
             self.activity_table(body, allowed=None, allow_scope=True)
 
-    def activity_table(self, parent, allowed=None, selected_month=False, compact=False, allow_scope=False):
-        state = self.filter_states.setdefault(self.current_page, {"query": "", "account": "All accounts", "type": "All types", "scope": "All dates", "page": 0, "voided": False})
+    def activity_table(self, parent, allowed=None, selected_month=False,
+                       compact=False, allow_scope=False):
+        state = self.filter_states.setdefault(
+            self.current_page,
+            {"query": "", "account": "All accounts", "type": "All types",
+             "scope": "All dates", "page": 0, "voided": False})
         top = tk.Frame(parent, bg=P["bg"])
-        top.pack(fill="x", pady=(0, 14))
-        label(top, "Recent activity" if compact else "Transaction history", 17, bold=True).pack(side="left")
+        top.pack(fill="x", pady=(0, 13))
+        label(top, "Recent activity" if compact else "Transaction history",
+              19, bold=True).pack(side="left")
         if compact:
-            Button(top, "View all", lambda: self.navigate("activity"), variant="secondary", height=30, small=True).pack(side="right")
+            Button(top, "View all", lambda: self.navigate("activity"),
+                   variant="secondary", height=32, small=True).pack(side="right")
         else:
             filters = tk.Frame(parent, bg=P["bg"])
-            filters.pack(fill="x", pady=(0, 14))
+            filters.pack(fill="x", pady=(0, 12))
+
+            search_shell = tk.Frame(filters, bg=P["field"], highlightthickness=1,
+                                    highlightbackground=P["border"])
+            search_shell.pack(side="left", fill="x", expand=True, padx=(0, 9))
+            search_icon = tk.Canvas(search_shell, width=32, height=40,
+                                    bg=P["field"], highlightthickness=0)
+            search_icon.pack(side="left")
+            search_icon.create_oval(10, 11, 21, 22, outline=P["dim"], width=1.5)
+            search_icon.create_line(20, 21, 25, 26, fill=P["dim"], width=1.5,
+                                    capstyle="round")
             search_var = tk.StringVar(value=state["query"])
-            search = tk.Entry(filters, textvariable=search_var, bg=P["field"], fg=P["text"], insertbackground=P["text"],
-                              relief="flat", bd=0, highlightthickness=1, highlightbackground=P["border"], font=font(13), width=20)
-            search.pack(side="left", fill="x", expand=True, ipady=9, padx=(0, 10))
-            if not state["query"]:
-                label(filters, "Search", 11, P["dim"]).pack(side="left", padx=(0, 10))
+            search = tk.Entry(search_shell, textvariable=search_var,
+                              bg=P["field"], fg=P["text"],
+                              insertbackground=P["text"], relief="flat", bd=0,
+                              highlightthickness=0, font=font(13),
+                              selectbackground=P["selection"])
+            search.pack(side="left", fill="both", expand=True, padx=(0, 12), pady=9)
+            placeholder = label(search_shell, "Search transactions", 12, P["dim"],
+                                bg=P["field"])
+            def place_placeholder():
+                if not search_var.get() and self.focus_get() is not search:
+                    placeholder.place(x=39, rely=.5, anchor="w")
+                else:
+                    placeholder.place_forget()
+            placeholder.bind("<Button-1>", lambda e: search.focus_set())
+            search.bind("<FocusIn>", lambda e: (placeholder.place_forget(),
+                                                  search_shell.configure(highlightbackground=P["accent"])))
+            search.bind("<FocusOut>", lambda e: (search_shell.configure(highlightbackground=P["border"]),
+                                                   place_placeholder()))
             def changed(*args):
                 state["query"], state["page"] = search_var.get(), 0
+                place_placeholder()
                 if self._search_job:
                     self.after_cancel(self._search_job)
                 self._search_job = self.after(150, self.fill_table)
             search_var.trace_add("write", changed)
+            place_placeholder()
+
             account_var = tk.StringVar(value=state["account"])
-            account_combo = ttk.Combobox(filters, textvariable=account_var, values=["All accounts"] + [a.name for a in ACCOUNTS.values()],
-                                         state="readonly", width=14, font=font(12), style="Finance.TCombobox")
+            account_combo = ttk.Combobox(
+                filters, textvariable=account_var,
+                values=["All accounts"] + [a.name for a in ACCOUNTS.values()],
+                state="readonly", width=14, font=font(12),
+                style="Finance.TCombobox")
             account_combo.pack(side="left", ipady=4)
-            def account_changed(e):
+            def account_changed(event=None):
                 state["account"], state["page"] = account_var.get(), 0
                 self.fill_table()
             account_combo.bind("<<ComboboxSelected>>", account_changed)
+
+            type_options = ["All types"] + [KIND_NAMES[k] for k in KINDS]
+            type_var = tk.StringVar(value=state["type"])
+            type_combo = ttk.Combobox(
+                filters, textvariable=type_var, values=type_options,
+                state="readonly", width=13, font=font(12),
+                style="Finance.TCombobox")
+            type_combo.pack(side="left", padx=(9, 0), ipady=4)
+            def type_changed(event=None):
+                state["type"], state["page"] = type_var.get(), 0
+                self.fill_table()
+            type_combo.bind("<<ComboboxSelected>>", type_changed)
+
             if allow_scope:
                 scope_var = tk.StringVar(value=state["scope"])
-                scope = ttk.Combobox(filters, textvariable=scope_var, values=["All dates", "Selected month"], state="readonly",
-                                     width=14, font=font(12), style="Finance.TCombobox")
-                scope.pack(side="left", padx=(10, 0), ipady=4)
-                def scope_changed(e):
+                scope = ttk.Combobox(
+                    filters, textvariable=scope_var,
+                    values=["All dates", "Selected month"], state="readonly",
+                    width=13, font=font(12), style="Finance.TCombobox")
+                scope.pack(side="left", padx=(9, 0), ipady=4)
+                def scope_changed(event=None):
                     state["scope"], state["page"] = scope_var.get(), 0
                     self.render()
                 scope.bind("<<ComboboxSelected>>", scope_changed)
                 if state["scope"] == "Selected month":
                     self.month_bar(parent, "Activity period")
+
             visibility = tk.Frame(parent, bg=P["bg"])
             visibility.pack(fill="x", pady=(0, 10))
-            label(visibility, "Double-click a row to review, edit or void it.", 11, P["dim"]).pack(side="left")
+            label(visibility, "Select a row to review, edit or void it.",
+                  11, P["dim"]).pack(side="left")
             void_var = tk.BooleanVar(value=state["voided"])
             def show_void():
                 state["voided"], state["page"] = void_var.get(), 0
                 self.fill_table()
-            tk.Checkbutton(visibility, text="Include voided", variable=void_var, command=show_void,
-                           font=font(11), bg=P["bg"], fg=P["dim"], activebackground=P["bg"], activeforeground=P["text"],
-                           selectcolor=P["field"], bd=0, highlightthickness=0).pack(side="right")
-        panel = card(parent)
+            tk.Checkbutton(
+                visibility, text="Include voided", variable=void_var,
+                command=show_void, font=font(11), bg=P["bg"], fg=P["dim"],
+                activebackground=P["bg"], activeforeground=P["text"],
+                selectcolor=P["field"], bd=0,
+                highlightthickness=0).pack(side="right")
+
+        panel = card(parent, tone=P["card"])
         panel.pack(fill="x")
-        columns = ("date", "title", "account", "amount")
-        tree = ttk.Treeview(panel, columns=columns, show="headings", style="Finance.Treeview", height=5 if compact else 9, selectmode="browse")
-        for key, title_, width_, minimum, stretch in [("date", "DATE", 100, 88, False), ("title", "DESCRIPTION", 265, 140, True),
-                                                      ("account", "ACCOUNT / ROUTE", 205, 145, True), ("amount", "AMOUNT", 265, 155, True)]:
-            tree.heading(key, text=title_, anchor="w" if key != "amount" else "e")
-            tree.column(key, width=width_, minwidth=minimum, stretch=stretch, anchor="e" if key == "amount" else "w")
-        tree.pack(side="left", fill="both", expand=True, padx=12)
-        bar = ttk.Scrollbar(panel, orient="vertical", command=tree.yview, style="Finance.Vertical.TScrollbar")
-        tree.configure(yscrollcommand=bar.set)
-        bar.pack(side="right", fill="y")
-        tree.tag_configure("voided", foreground=P["dim"])
-        tree.tag_configure("alternate", background="#1C1F27")
-        for kind, color in ACTIVITY_COLORS.items():
-            tree.tag_configure(kind, foreground=color)
-        tree.bind("<Double-1>", lambda e: self.open_selected(tree))
-        tree.bind("<Return>", lambda e: self.open_selected(tree))
+        if not compact:
+            header = tk.Frame(panel, bg=P["surface"], height=43)
+            header.pack(fill="x")
+            header.pack_propagate(False)
+            header.grid_columnconfigure(1, weight=3)
+            header.grid_columnconfigure(2, weight=2)
+            for column, text_, width, anchor in [
+                    (0, "DATE", 112, "w"), (1, "DESCRIPTION", None, "w"),
+                    (2, "ACCOUNT / ROUTE", None, "w"),
+                    (3, "AMOUNT", 220, "e")]:
+                item = label(header, text_, 9, P["dim"], True,
+                             bg=P["surface"], anchor=anchor)
+                item.grid(row=0, column=column, sticky="ew", padx=(18, 18), pady=14)
+                if width:
+                    header.grid_columnconfigure(column, minsize=width)
+        host = tk.Frame(panel, bg=P["card"])
+        host.pack(fill="x")
         footer = tk.Frame(parent, bg=P["bg"])
-        footer.pack(fill="x", pady=(12, 8))
+        footer.pack(fill="x", pady=(11, 8))
         count_label = label(footer, "", 11, P["dim"])
         count_label.pack(side="left")
         if not compact:
-            Button(footer, "Next", lambda: self.page_table(1), variant="secondary", height=30, small=True).pack(side="right")
-            Button(footer, "Previous", lambda: self.page_table(-1), variant="secondary", height=30, small=True).pack(side="right", padx=(0, 8))
-        self._table_context = {"tree": tree, "state": state, "allowed": allowed, "month": selected_month,
-                               "compact": compact, "allow_scope": allow_scope, "count": count_label, "page_size": 5 if compact else 50}
+            Button(footer, "Next", lambda: self.page_table(1),
+                   variant="secondary", height=31, small=True).pack(side="right")
+            Button(footer, "Previous", lambda: self.page_table(-1),
+                   variant="secondary", height=31, small=True).pack(
+                       side="right", padx=(0, 8))
+        self._table_context = {
+            "host": host, "state": state, "allowed": allowed,
+            "month": selected_month, "compact": compact,
+            "allow_scope": allow_scope, "count": count_label,
+            "page_size": 5 if compact else 25}
         self.fill_table()
+
+    def _activity_row(self, parent, record, index, compact=False):
+        base = P["card"] if index % 2 == 0 else P["card_alt"]
+        row = tk.Frame(parent, bg=base, height=68 if compact else 62)
+        row.pack(fill="x")
+        row.pack_propagate(False)
+        amount_color = activity_color(record)
+        title_text = ("Voided • " if record.voided else "") + record.title
+
+        if compact:
+            icon = tk.Canvas(row, width=46, height=68, bg=base,
+                             highlightthickness=0)
+            icon.pack(side="left", padx=(10, 0))
+            icon.create_oval(14, 23, 26, 35, fill=amount_color, outline="")
+            center = tk.Frame(row, bg=base)
+            center.pack(side="left", fill="both", expand=True, padx=(4, 14), pady=12)
+            label(center, title_text, 13, P["text"] if not record.voided else P["dim"],
+                  True, bg=base).pack(fill="x")
+            label(center, f"{record.day}  •  {record.route}", 11, P["dim"],
+                  bg=base).pack(fill="x", pady=(5, 0))
+            label(row, record.amount_text, 14, amount_color, True, bg=base,
+                  anchor="e").pack(side="right", padx=18)
+        else:
+            row.grid_columnconfigure(1, weight=3)
+            row.grid_columnconfigure(2, weight=2)
+            date_box = tk.Frame(row, bg=base, width=112)
+            date_box.grid(row=0, column=0, sticky="nsew")
+            date_box.grid_propagate(False)
+            label(date_box, record.day, 12, P["muted"], bg=base).pack(
+                fill="both", expand=True, padx=18)
+            description = tk.Frame(row, bg=base)
+            description.grid(row=0, column=1, sticky="nsew", padx=(18, 12), pady=10)
+            dot = tk.Canvas(description, width=12, height=20, bg=base,
+                            highlightthickness=0)
+            dot.pack(side="left", padx=(0, 8))
+            dot.create_oval(3, 7, 9, 13, fill=amount_color, outline="")
+            text_host = tk.Frame(description, bg=base)
+            text_host.pack(side="left", fill="both", expand=True)
+            label(text_host, title_text, 13,
+                  P["text"] if not record.voided else P["dim"], True,
+                  bg=base).pack(fill="x")
+            label(text_host, KIND_NAMES[record.kind], 10, P["dim"],
+                  bg=base).pack(fill="x", pady=(3, 0))
+            label(row, record.route, 12, P["muted"], bg=base,
+                  wraplength=250, justify="left").grid(
+                      row=0, column=2, sticky="w", padx=18)
+            amount_box = tk.Frame(row, bg=base, width=220)
+            amount_box.grid(row=0, column=3, sticky="nsew")
+            amount_box.grid_propagate(False)
+            label(amount_box, record.amount_text, 13, amount_color, True,
+                  bg=base, anchor="e", justify="right").pack(
+                      fill="both", expand=True, padx=18)
+
+        def open_record(event=None):
+            if not self.modals:
+                DetailDialog(self, record)
+            else:
+                next(iter(self.modals)).lift()
+            return "break"
+        def bind_recursive(widget):
+            safe_cursor(widget, True)
+            widget.bind("<Button-1>", open_record)
+            widget.bind("<Return>", open_record)
+            for child in widget.winfo_children():
+                bind_recursive(child)
+        bind_recursive(row)
+        tk.Frame(parent, bg=P["hairline"], height=1).pack(fill="x")
 
     def filtered_records(self, context=None):
         context = context or self._table_context
@@ -2535,43 +2905,63 @@ class FinanceApp(tk.Tk):
         state = context["state"]
         query = state["query"].casefold().strip() if not context["compact"] else ""
         account = ACCOUNT_NAMES.get(state["account"])
+        kind_filter = next((kind for kind, name in KIND_NAMES.items()
+                            if name == state.get("type")), None)
         records = []
-        for r in self.snapshot.records:
-            if r.voided and (context["compact"] or not state["voided"]):
+        for record in self.snapshot.records:
+            if record.voided and (context["compact"] or not state["voided"]):
                 continue
-            if context["allowed"] and r.kind not in context["allowed"]:
+            if context["allowed"] and record.kind not in context["allowed"]:
                 continue
-            if (context["month"] or (context["allow_scope"] and state["scope"] == "Selected month")) and not r.day.startswith(self.selected_month):
+            if kind_filter and record.kind != kind_filter:
                 continue
-            if not context["compact"] and account and account not in (r.account, r.destination):
+            if (context["month"] or
+                    (context["allow_scope"] and state["scope"] == "Selected month")) and not record.day.startswith(self.selected_month):
                 continue
-            haystack = f"{r.title} {r.description} {r.category} {r.notes} {r.borrower} {r.amount} {r.day} {r.route} {r.currency} {KIND_NAMES[r.kind]}".casefold()
+            if not context["compact"] and account and account not in (record.account, record.destination):
+                continue
+            haystack = (f"{record.title} {record.description} {record.category} "
+                        f"{record.notes} {record.borrower} {record.amount} "
+                        f"{record.day} {record.route} {record.currency} "
+                        f"{KIND_NAMES[record.kind]}").casefold()
             if query and query not in haystack:
                 continue
-            records.append(r)
-        records.sort(key=lambda r: (r.day, str(r.raw.get("created_at", r.raw.get("date", ""))), r.id), reverse=True)
+            records.append(record)
+        records.sort(
+            key=lambda record: (
+                record.day,
+                str(record.raw.get("created_at", record.raw.get("date", ""))),
+                record.id), reverse=True)
         return records
 
     def fill_table(self):
         self._search_job = None
         context = self._table_context
-        if not context or not context["tree"].winfo_exists():
+        if not context or not context["host"].winfo_exists():
             return
-        tree, state = context["tree"], context["state"]
+        host, state = context["host"], context["state"]
         rows = self.filtered_records(context)
         size = context["page_size"]
         pages = max(1, (len(rows) + size - 1)//size)
         state["page"] = max(0, min(state["page"], pages-1))
         start = 0 if context["compact"] else state["page"] * size
-        tree.delete(*tree.get_children())
-        for i, rec in enumerate(rows[start:start+size]):
-            title_ = ("[Voided] " if rec.voided else "") + rec.title
-            tree.insert("", "end", iid=rec.id, values=(rec.day, title_, rec.route, rec.amount_text),
-                        tags=activity_tags(rec, i))
-        if not rows:
-            context["count"].configure(text="No matching transactions. Add a record or adjust your filters.")
-        else:
-            context["count"].configure(text=f"Showing {start+1}-{min(start+size, len(rows))} of {len(rows)} records" + ("  /  selected month" if context["month"] else ""))
+        for child in host.winfo_children():
+            child.destroy()
+        visible = rows[start:start+size]
+        if not visible:
+            empty = tk.Frame(host, bg=P["card"])
+            empty.pack(fill="x")
+            label(empty, "No matching transactions", 14, P["muted"], True,
+                  bg=P["card"], anchor="center").pack(fill="x", pady=(28, 6))
+            label(empty, "Add a record or adjust the filters.", 11, P["dim"],
+                  bg=P["card"], anchor="center").pack(fill="x", pady=(0, 28))
+            context["count"].configure(text="No matching transactions")
+            return
+        for index, record in enumerate(visible):
+            self._activity_row(host, record, index, context["compact"])
+        suffix = " • selected month" if context["month"] else ""
+        context["count"].configure(
+            text=f"Showing {start+1}–{min(start+size, len(rows))} of {len(rows)}{suffix}")
 
     def page_table(self, delta):
         if self._table_context:
@@ -2579,7 +2969,9 @@ class FinanceApp(tk.Tk):
             self.fill_table()
 
     def open_selected(self, tree):
-        selection = tree.selection()
+        # Retained for compatibility with older extensions; the Apple-style
+        # activity list opens rows directly.
+        selection = tree.selection() if hasattr(tree, "selection") else ()
         if selection:
             record = self.snapshot.by_id(selection[0])
             if record:
