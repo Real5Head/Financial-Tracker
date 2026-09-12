@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.1 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.1.1 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -19,6 +19,7 @@ Important upgrade rules:
   They never change recorded amounts or add rate fields to the transfer form.
 * The DZD total excludes unpaid loans, matching the original cash/savings total.
 * Activity rows use type colors; voided entries stay muted.
+* macOS startup uses native-safe cursors, Keychain access and persistent crash logs.
 
 No money is moved by this application: it records transactions you already made.
 """
@@ -28,15 +29,18 @@ import base64
 import copy
 import csv
 import ctypes
+import faulthandler
 import hashlib
 import json
 import os
 import queue
 import re
+import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -44,8 +48,28 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+try:
+    import tkinter as tk
+    from tkinter import filedialog, font as tkfont, messagebox, ttk
+except Exception as _tk_import_error:
+    # A windowed macOS build otherwise exits with no visible explanation.
+    _early_log = (Path.home() / "Library" / "Logs" / "FinanceTracker" / "finance_tracker.log"
+                  if sys.platform == "darwin" else Path.home() / ".finance_tracker" / "logs" / "finance_tracker.log")
+    try:
+        _early_log.parent.mkdir(parents=True, exist_ok=True)
+        with _early_log.open("a", encoding="utf-8") as _handle:
+            _handle.write("\n[" + datetime.now().isoformat(timespec="seconds") + "] Tkinter import failed\n")
+            traceback.print_exception(type(_tk_import_error), _tk_import_error, _tk_import_error.__traceback__, file=_handle)
+    except Exception:
+        pass
+    if sys.platform == "darwin" and Path("/usr/bin/osascript").exists():
+        try:
+            subprocess.run(["/usr/bin/osascript", "-e",
+                            'display alert "Finance could not start" message "The macOS Python/Tkinter runtime is missing or damaged. See ~/Library/Logs/FinanceTracker/finance_tracker.log" as critical'],
+                           timeout=8, check=False)
+        except Exception:
+            pass
+    raise
 
 try:
     import psycopg2
@@ -56,13 +80,17 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
 MAX_AMOUNT = Decimal("999999999999.99")
 CONFIG_FILE = Path.home() / "finance_tracker_db_config.json"
 DATA_DIR = Path.home() / ".finance_tracker"
+IS_MAC = sys.platform == "darwin"
+LOG_DIR = (Path.home() / "Library" / "Logs" / "FinanceTracker") if IS_MAC else (DATA_DIR / "logs")
+LOG_FILE = LOG_DIR / "finance_tracker.log"
+_FAULT_LOG_HANDLE = None
 CURRENCIES = ("USD", "EUR", "DZD")
 KINDS = ("income", "expense", "transfer", "savings_deposit", "savings_withdraw",
          "loan_out", "loan_repaid", "opening", "adjustment")
@@ -71,6 +99,73 @@ CATEGORIES = ("Essentials", "Business", "Food", "Transport", "Shopping", "Debt",
 DISPLAY_RATE_KEYS = {"USD": "display_rate", "EUR": "display_rate_eur"}
 RATE_UNIT = Decimal("0.000001")
 MAX_DISPLAY_RATE = Decimal("1000000")
+
+
+def _redact_secrets(text: str) -> str:
+    """Keep diagnostics useful without writing a PostgreSQL password to disk."""
+    text = str(text)
+    text = re.sub(r"(?i)(postgres(?:ql)?://[^:/\s]+:)[^@\s]+(@)", r"\1***\2", text)
+    text = re.sub(r"(?i)(password\s*[=:]\s*)[^\s,;]+", r"\1***", text)
+    return text
+
+
+def write_diagnostic(message: str, exc: Optional[BaseException] = None) -> None:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with LOG_FILE.open("a", encoding="utf-8") as handle:
+            handle.write("\n[" + datetime.now().isoformat(timespec="seconds") + "] " + _redact_secrets(message) + "\n")
+            if exc is not None:
+                rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                handle.write(_redact_secrets(rendered))
+    except Exception:
+        pass
+
+
+def enable_crash_diagnostics() -> None:
+    global _FAULT_LOG_HANDLE
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _FAULT_LOG_HANDLE = LOG_FILE.open("a", encoding="utf-8", buffering=1)
+        _FAULT_LOG_HANDLE.write("\n[" + datetime.now().isoformat(timespec="seconds") + "] Finance " + APP_VERSION + " starting on " + sys.platform + "\n")
+        faulthandler.enable(_FAULT_LOG_HANDLE, all_threads=True)
+    except Exception:
+        _FAULT_LOG_HANDLE = None
+
+
+def native_fatal_alert(title: str, message: str) -> None:
+    """Show a useful error even from a --windowed .app with no Terminal."""
+    safe_message = _redact_secrets(message)
+    if IS_MAC and Path("/usr/bin/osascript").exists():
+        try:
+            def quote(value: str) -> str:
+                return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            script = f'display alert "{quote(title)}" message "{quote(safe_message)}" as critical'
+            subprocess.run(["/usr/bin/osascript", "-e", script], timeout=8, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            pass
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(title, safe_message, parent=root)
+        root.destroy()
+    except Exception:
+        try:
+            print(title + ": " + safe_message, file=sys.stderr)
+        except Exception:
+            pass
+
+
+def safe_cursor(widget: tk.Misc, enabled: bool = True) -> None:
+    """Use cursor names accepted by native Aqua Tk as well as Windows Tk."""
+    candidates = (["pointinghand", "arrow"] if IS_MAC else ["hand2", "arrow"]) if enabled else ["arrow"]
+    for cursor_name in candidates:
+        try:
+            widget.configure(cursor=cursor_name)
+            return
+        except tk.TclError:
+            continue
 
 
 class ValidationError(Exception):
@@ -705,49 +800,38 @@ class CredentialStore:
 
     @classmethod
     def _mac(cls, password: Optional[str] = None) -> str:
-        sec = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
-        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
-        find = sec.SecKeychainFindGenericPassword
-        find.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p,
-                         ctypes.c_uint32, ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint32),
-                         ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
-        find.restype = ctypes.c_int32
-        sec.SecKeychainItemFreeContent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        sec.SecKeychainItemFreeContent.restype = ctypes.c_int32
-        cf.CFRelease.argtypes = [ctypes.c_void_p]
-        cf.CFRelease.restype = None
-        size, data, item = ctypes.c_uint32(), ctypes.c_void_p(), ctypes.c_void_p()
-        status = find(None, len(cls.SERVICE), cls.SERVICE, len(cls.ACCOUNT), cls.ACCOUNT,
-                      ctypes.byref(size), ctypes.byref(data), ctypes.byref(item))
+        """Read/write macOS Keychain through Apple's security tool.
+
+        The previous raw ctypes bridge could terminate a windowed app before Tk
+        could display an exception. /usr/bin/security is present on supported
+        macOS versions and fails as a normal Python exception instead of a hard
+        process crash.
+        """
+        tool = Path("/usr/bin/security")
+        if not tool.exists():
+            raise OSError("The macOS Keychain command is unavailable.")
+        service = cls.SERVICE.decode("utf-8")
+        account = cls.ACCOUNT.decode("utf-8")
+        if password is None:
+            command = [str(tool), "find-generic-password", "-s", service, "-a", account, "-w"]
+        else:
+            command = [str(tool), "add-generic-password", "-U", "-s", service,
+                       "-a", account, "-w", password]
         try:
-            if password is None:
-                if status != 0:
-                    raise OSError("The database credential could not be read from Keychain.")
-                return ctypes.string_at(data, size.value).decode("utf-8")
-            encoded = password.encode("utf-8")
-            if status == 0:
-                modify = sec.SecKeychainItemModifyAttributesAndData
-                modify.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p]
-                modify.restype = ctypes.c_int32
-                result = modify(item, None, len(encoded), encoded)
-            elif status == -25300:  # errSecItemNotFound
-                add = sec.SecKeychainAddGenericPassword
-                add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p,
-                                ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32,
-                                ctypes.c_char_p, ctypes.c_void_p]
-                add.restype = ctypes.c_int32
-                result = add(None, len(cls.SERVICE), cls.SERVICE, len(cls.ACCOUNT), cls.ACCOUNT,
-                             len(encoded), encoded, None)
-            else:
-                raise OSError("Keychain access was not granted.")
-            if result != 0:
-                raise OSError("The database credential could not be stored in Keychain.")
-            return password
-        finally:
-            if data.value:
-                sec.SecKeychainItemFreeContent(None, data)
-            if item.value:
-                cf.CFRelease(item)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OSError("macOS Keychain could not be opened.") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Keychain rejected the request.").strip()
+            write_diagnostic("macOS Keychain request failed: " + detail)
+            raise OSError("The database credential could not be " +
+                          ("read from" if password is None else "stored in") + " Keychain.")
+        if password is None:
+            value = result.stdout.rstrip("\r\n")
+            if not value:
+                raise OSError("The database credential in Keychain is empty.")
+            return value
+        return password
 
     def load(self) -> Tuple[str, str]:
         env = os.environ.get("FINANCE_DATABASE_URL", "").strip()
@@ -1097,7 +1181,8 @@ class Button(tk.Canvas):
         self.font_spec = font(12 if small else 13, True)
         calculated = tkfont.Font(font=self.font_spec).measure(text) + 30
         super().__init__(parent, width=width or calculated, height=height, bg=parent.cget("bg"),
-                         highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
+                         highlightthickness=0, bd=0, takefocus=1)
+        safe_cursor(self, True)
         self.bind("<Configure>", self._draw)
         self.bind("<Enter>", lambda e: self._hover(True))
         self.bind("<Leave>", lambda e: self._hover(False))
@@ -1123,7 +1208,8 @@ class Button(tk.Canvas):
 
     def set_enabled(self, enabled):
         self.enabled = bool(enabled)
-        self.configure(cursor="hand2" if enabled else "arrow", takefocus=1 if enabled else 0)
+        self.configure(takefocus=1 if enabled else 0)
+        safe_cursor(self, self.enabled)
         self._draw()
 
     def set_text(self, text):
@@ -1755,8 +1841,11 @@ class FinanceApp(tk.Tk):
     def __init__(self, demo=False):
         super().__init__()
         global FONT_FAMILY
-        families = set(tkfont.families(self))
-        preferences = ("SF Pro Text", "Helvetica Neue", "Arial") if sys.platform == "darwin" else ("Segoe UI", "DejaVu Sans", "Arial")
+        try:
+            families = set(tkfont.families(self))
+        except tk.TclError:
+            families = set()
+        preferences = ("SF Pro Text", "Helvetica Neue", "Arial") if IS_MAC else ("Segoe UI", "DejaVu Sans", "Arial")
         FONT_FAMILY = next((name for name in preferences if name in families), "TkDefaultFont")
         self.title("Finance" + (" - DEMO" if demo else ""))
         self.configure(bg=P["bg"])
@@ -1790,17 +1879,30 @@ class FinanceApp(tk.Tk):
         self.bind_all("<Button-5>", self._wheel, add="+")
         self.bind("<Control-r>", lambda e: self.refresh())
         self.bind("<Control-n>", lambda e: self.open_form("income"))
-        if sys.platform == "darwin":
+        if IS_MAC:
             self.bind("<Command-r>", lambda e: self.refresh())
             self.bind("<Command-n>", lambda e: self.open_form("income"))
         self.bind("<FocusIn>", self._on_focus, add="+")
         self.after(60, self._drain)
         self.show_connecting()
+        self.after_idle(self._ensure_visible)
         self.after(80, self.startup)
+
+    def _ensure_visible(self):
+        try:
+            self.deiconify()
+            self.lift()
+            self.update_idletasks()
+        except tk.TclError:
+            pass
 
     def _style(self):
         style = ttk.Style(self)
-        style.theme_use("clam")
+        try:
+            available = set(style.theme_names())
+            style.theme_use("clam" if "clam" in available else "aqua" if IS_MAC and "aqua" in available else "default")
+        except tk.TclError as exc:
+            write_diagnostic("Tk theme selection failed; using the active theme.", exc)
         style.configure("Finance.Treeview", background=P["card"], foreground=P["text"],
                         fieldbackground=P["card"], borderwidth=0, relief="flat", rowheight=54, font=font(13))
         style.configure("Finance.Treeview.Heading", background=P["card"], foreground=P["dim"],
@@ -1847,8 +1949,9 @@ class FinanceApp(tk.Tk):
                 break
             try:
                 callback(result, error)
-            except Exception:
-                messagebox.showerror("Interface error", "The interface could not display the result. Refresh before repeating any financial operation.", parent=self)
+            except Exception as exc:
+                write_diagnostic("A background result could not be displayed.", exc)
+                messagebox.showerror("Interface error", "The interface could not display the result. Refresh before repeating any financial operation.\n\nA diagnostic was saved to:\n" + str(LOG_FILE), parent=self)
         self.after(60, self._drain)
 
     def _on_focus(self, event):
@@ -1887,7 +1990,12 @@ class FinanceApp(tk.Tk):
     def show_setup(self, error_text=""):
         self.clear_root()
         outer = tk.Frame(self, bg=P["bg"])
-        outer.place(relx=.5, rely=.5, anchor="center", width=min(620, self.winfo_width()-60))
+        # Aqua Tk can report a width of 1 during the first event-loop cycle.
+        # Never pass a negative or tiny width to place(), or a windowed app can
+        # appear to close without showing the setup screen.
+        current_width = max(self.winfo_width(), self.winfo_reqwidth(), 680)
+        outer_width = min(620, max(380, current_width - 60))
+        outer.place(relx=.5, rely=.5, anchor="center", width=outer_width)
         label(outer, "FINANCE  /  PERSONAL WORKSPACE", 11, P["accent"], True).pack(fill="x", pady=(0, 22))
         label(outer, "Welcome back.", 36, bold=True).pack(fill="x")
         label(outer, "One ledger. Every account.", 18, P["muted"]).pack(fill="x", pady=(10, 30))
@@ -1978,7 +2086,7 @@ class FinanceApp(tk.Tk):
         for page, name in self.PAGES:
             if page == "activity":
                 tk.Frame(self.sidebar, bg=P["border"], height=1).pack(fill="x", padx=24, pady=(12, 8))
-            row = tk.Frame(self.sidebar, bg=P["sidebar"], cursor="hand2", height=40)
+            row = tk.Frame(self.sidebar, bg=P["sidebar"], height=40)
             row.pack(fill="x", padx=12, pady=2)
             row.pack_propagate(False)
             icon = tk.Canvas(row, bg=P["sidebar"], width=25, height=25, highlightthickness=0)
@@ -1987,6 +2095,7 @@ class FinanceApp(tk.Tk):
             title = label(row, name, 13, P["muted"])
             title.pack(side="left")
             for widget in (row, icon, title):
+                safe_cursor(widget, True)
                 widget.bind("<Button-1>", lambda e, p=page: self.navigate(p))
                 widget.bind("<Enter>", lambda e, p=page: self.nav_hover(p, True))
                 widget.bind("<Leave>", lambda e, p=page: self.nav_hover(p, False))
@@ -2631,10 +2740,10 @@ class FinanceApp(tk.Tk):
             self.toast("The CSV could not be saved. Choose a writable location.", error=True)
 
     def report_callback_exception(self, exc_type, exc, tb):
+        write_diagnostic("Tk callback failed.", exc)
         if not self.closed:
-            messagebox.showerror("Interface error", "The interface encountered an error. Refresh before repeating any financial action.\n\nError type: " + exc_type.__name__, parent=self)
+            messagebox.showerror("Interface error", "The interface encountered an error. Refresh before repeating any financial action.\n\nError type: " + exc_type.__name__ + "\nDiagnostic: " + str(LOG_FILE), parent=self)
         if os.environ.get("FINANCE_DEBUG") == "1":
-            import traceback
             traceback.print_exception(exc_type, exc, tb)
 
     def close_app(self):
@@ -2654,16 +2763,31 @@ FinancialTrackerApp = FinanceApp
 
 
 def main():
+    enable_crash_diagnostics()
     demo = "--demo" in sys.argv
-    if not demo and psycopg2 is None:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("Missing original dependency", "Finance requires psycopg2, as your original app did.\n\nInstall it with:\npython -m pip install psycopg2-binary\n\nFor a database-free preview:\npython financial_tracker.py --demo")
-        root.destroy()
+    try:
+        if not demo and psycopg2 is None:
+            text = ("Finance requires psycopg2, as your original app did.\n\n"
+                    "Install it with:\npython3 -m pip install psycopg2-binary\n\n"
+                    "For a database-free preview:\npython3 financial_tracker.py --demo\n\n"
+                    "Diagnostic: " + str(LOG_FILE))
+            write_diagnostic("psycopg2 is unavailable in this Python environment.")
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showerror("Missing original dependency", text, parent=root)
+                root.destroy()
+            except Exception:
+                native_fatal_alert("Finance could not start", text)
+            return 1
+        app = FinanceApp(demo=demo)
+        app.mainloop()
+        return 0
+    except BaseException as exc:
+        write_diagnostic("Fatal startup/runtime error.", exc)
+        native_fatal_alert("Finance could not start",
+                           "A startup error was recorded. Open this file for the exact cause:\n" + str(LOG_FILE))
         return 1
-    app = FinanceApp(demo=demo)
-    app.mainloop()
-    return 0
 
 
 if __name__ == "__main__":
