@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.2.0 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.2.1 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -20,6 +20,8 @@ Important upgrade rules:
 * The DZD total excludes unpaid loans, matching the original cash/savings total.
 * Activity rows use type colors; voided entries stay muted.
 * The interface uses a cleaner Apple-inspired dark workspace with system colors.
+* USD and EUR values show their saved-rate DZD equivalent throughout the interface.
+* SF Pro Text and SF Pro Display are preferred on both macOS and Windows.
 * macOS startup uses native-safe cursors, Keychain access and persistent crash logs.
 
 No money is moved by this application: it records transactions you already made.
@@ -81,7 +83,7 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -375,6 +377,50 @@ def dzd_equivalent(amounts: Dict[str, Decimal], settings: Dict[str, Any]) -> Opt
             return None
         total += amount * rate
     return total.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def amount_in_dinars(amount: Decimal, currency: str,
+                      settings: Dict[str, Any]) -> Optional[Decimal]:
+    """Return one amount's display-only DZD value using the saved quote."""
+    value = amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if currency == "DZD" or value == ZERO:
+        return value
+    rate = display_rates(settings).get(currency)
+    if rate is None:
+        return None
+    return (value * rate).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def dinar_equivalent_text(amount: Decimal, currency: str,
+                           settings: Dict[str, Any], *,
+                           include_dzd: bool = False) -> str:
+    """Compact DZD equivalent text for cards, rows and previews."""
+    if currency == "DZD" and not include_dzd:
+        return ""
+    value = amount_in_dinars(amount, currency, settings)
+    if value is None:
+        return f"Set {currency} display rate"
+    # Match the original tracker: DZD estimates are display values rounded to
+    # the nearest dinar, while recorded account amounts keep cent precision.
+    return f"≈ {value:,.0f} DZD"
+
+
+def record_dinar_equivalent(record: "Record",
+                             settings: Dict[str, Any]) -> str:
+    """DZD estimate for a ledger row without changing recorded amounts."""
+    if record.kind != "transfer":
+        return dinar_equivalent_text(record.amount, record.currency, settings)
+    parts: List[str] = []
+    source_currency = ACCOUNTS[record.account].currency
+    destination_currency = ACCOUNTS[record.destination].currency
+    source = dinar_equivalent_text(record.amount, source_currency, settings)
+    destination = dinar_equivalent_text(record.received, destination_currency, settings)
+    if source:
+        parts.append(source)
+    if destination:
+        parts.append(destination)
+    return "  →  ".join(parts)
+
 
 @dataclass
 class Record:
@@ -1172,7 +1218,8 @@ ACTIVITY_COLORS = {
     "opening": P["purple"],
     "adjustment": P["purple"],
 }
-FONT_FAMILY = "Arial"
+FONT_TEXT_FAMILY = "SF Pro Text"
+FONT_DISPLAY_FAMILY = "SF Pro Display"
 
 
 def activity_color(record: Record) -> str:
@@ -1185,7 +1232,8 @@ def activity_tags(record: Record, index: int) -> Tuple[str, ...]:
 
 
 def font(size: int = 14, bold: bool = False) -> Tuple[str, int, str]:
-    return FONT_FAMILY, -size, "bold" if bold else "normal"
+    family = FONT_DISPLAY_FAMILY if size >= 20 else FONT_TEXT_FAMILY
+    return family, -size, "bold" if bold else "normal"
 
 
 def label(parent, text="", size=14, color=None, bold=False, bg=None, **kwargs):
@@ -1774,7 +1822,23 @@ class TransactionDialog(Modal):
             src = account_key(self.fields[key].get())
             available, saved = self.preview_balances()
             current = (saved if self.kind == "savings_withdraw" else available)[src]
-            self.balance_hint.configure(text=f"{ACCOUNTS[src].name}: {fmt(current, ACCOUNTS[src].currency)} {'saved' if self.kind == 'savings_withdraw' else 'available'}{' before this record' if self.record else ''}.", fg=P["muted"])
+            current_equivalent = dinar_equivalent_text(
+                current, ACCOUNTS[src].currency, self.app.snapshot.settings)
+            current_line = (f"{ACCOUNTS[src].name}: {fmt(current, ACCOUNTS[src].currency)} "
+                            f"{'saved' if self.kind == 'savings_withdraw' else 'available'}"
+                            f"{' before this record' if self.record else ''}.")
+            if current_equivalent:
+                current_line += "  " + current_equivalent
+            if self.kind != "transfer" and "amount" in self.fields:
+                try:
+                    entered = money(self.fields["amount"].get())
+                    entered_equivalent = dinar_equivalent_text(
+                        entered, ACCOUNTS[src].currency, self.app.snapshot.settings)
+                    if entered_equivalent:
+                        current_line += "\nEntered amount: " + entered_equivalent
+                except ValidationError:
+                    pass
+            self.balance_hint.configure(text=current_line, fg=P["muted"])
             if self.kind == "transfer":
                 dst = account_key(self.fields["to_account"].get())
                 sent_text = self.fields["amount_sent"].get()
@@ -1788,12 +1852,46 @@ class TransactionDialog(Modal):
                     sent = money(sent_text)
                     received = money(self.fields["amount_received"].get())
                     self.rate_label.configure(text=rate_text(src, dst, sent, received))
-                    self.balance_hint.configure(text=f"After {'changes' if self.record else 'transfer'}: {ACCOUNTS[src].name} {fmt(current-sent, ACCOUNTS[src].currency)}\n{ACCOUNTS[dst].name} {fmt(available[dst]+received, ACCOUNTS[dst].currency)}",
-                                                fg=P["red"] if sent > current else P["muted"])
+                    source_after = current - sent
+                    destination_after = available[dst] + received
+                    source_after_equivalent = dinar_equivalent_text(
+                        source_after, ACCOUNTS[src].currency,
+                        self.app.snapshot.settings)
+                    destination_after_equivalent = dinar_equivalent_text(
+                        destination_after, ACCOUNTS[dst].currency,
+                        self.app.snapshot.settings)
+                    source_line = f"{ACCOUNTS[src].name} {fmt(source_after, ACCOUNTS[src].currency)}"
+                    destination_line = f"{ACCOUNTS[dst].name} {fmt(destination_after, ACCOUNTS[dst].currency)}"
+                    if source_after_equivalent:
+                        source_line += "  " + source_after_equivalent
+                    if destination_after_equivalent:
+                        destination_line += "  " + destination_after_equivalent
+                    sent_equivalent = dinar_equivalent_text(
+                        sent, ACCOUNTS[src].currency, self.app.snapshot.settings)
+                    received_equivalent = dinar_equivalent_text(
+                        received, ACCOUNTS[dst].currency, self.app.snapshot.settings)
+                    value_parts = []
+                    if sent_equivalent:
+                        value_parts.append("Sent " + sent_equivalent)
+                    if received_equivalent:
+                        value_parts.append("Received " + received_equivalent)
+                    value_line = ("\nDisplay value: " + "  •  ".join(value_parts)) if value_parts else ""
+                    self.balance_hint.configure(
+                        text=(f"After {'changes' if self.record else 'transfer'}: "
+                              f"{source_line}\n{destination_line}{value_line}"),
+                        fg=P["red"] if sent > current else P["muted"])
                 except ValidationError:
                     self.rate_label.configure(text="Enter both amounts")
             elif self.loan:
-                self.balance_hint.configure(text=f"Still owed by {self.loan.borrower}: {fmt(self.app.snapshot.outstanding.get(self.loan.id, ZERO), self.loan.currency)}. Repayment goes to {ACCOUNTS[src].name}.")
+                outstanding = self.app.snapshot.outstanding.get(self.loan.id, ZERO)
+                outstanding_equivalent = dinar_equivalent_text(
+                    outstanding, self.loan.currency, self.app.snapshot.settings)
+                text = (f"Still owed by {self.loan.borrower}: "
+                        f"{fmt(outstanding, self.loan.currency)}")
+                if outstanding_equivalent:
+                    text += "  " + outstanding_equivalent
+                text += f". Repayment goes to {ACCOUNTS[src].name}."
+                self.balance_hint.configure(text=text)
         except (ValidationError, KeyError):
             pass
         finally:
@@ -1860,13 +1958,24 @@ class DetailDialog(Modal):
         summary = card(self.body)
         summary.pack(fill="x", pady=(0, 18))
         label(summary, KIND_NAMES[record.kind].upper() + ("  /  VOIDED" if record.voided else ""), 10, P["dim"], True).pack(fill="x", padx=20, pady=(18, 8))
+        equivalent = record_dinar_equivalent(record, app.snapshot.settings)
         label(summary, record.amount_text, 22, activity_color(record), True,
-              wraplength=550, justify="left").pack(fill="x", padx=20, pady=(0, 18))
+              wraplength=550, justify="left").pack(
+                  fill="x", padx=20, pady=(0, 4 if equivalent else 18))
+        if equivalent:
+            label(summary, equivalent, 12, P["muted"],
+                  wraplength=550, justify="left").pack(
+                      fill="x", padx=20, pady=(0, 18))
         fields = [("Description", record.title), ("Date", record.day), ("Account", record.route)]
         if record.kind == "transfer":
             fields.append(("Calculated rate", rate_text(record.account, record.destination, record.amount, record.received)))
         if record.kind == "loan_out":
-            fields.append(("Remaining", fmt(app.snapshot.outstanding.get(record.id, ZERO), record.currency)))
+            remaining = app.snapshot.outstanding.get(record.id, ZERO)
+            fields.append(("Remaining", fmt(remaining, record.currency)))
+            remaining_equivalent = dinar_equivalent_text(
+                remaining, record.currency, app.snapshot.settings)
+            if remaining_equivalent:
+                fields.append(("Remaining in dinars", remaining_equivalent))
         if record.kind == "expense":
             fields.append(("Category", record.category or "Other"))
         if record.notes:
@@ -1947,15 +2056,41 @@ class FinanceApp(tk.Tk):
 
     def __init__(self, demo=False):
         super().__init__()
-        global FONT_FAMILY
+        global FONT_TEXT_FAMILY, FONT_DISPLAY_FAMILY
         try:
-            families = set(tkfont.families(self))
+            families = tuple(tkfont.families(self))
         except tk.TclError:
-            families = set()
-        preferences = (("SF Pro Display", "SF Pro Text", "Helvetica Neue", "Arial")
-                       if IS_MAC else
-                       ("Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "Arial"))
-        FONT_FAMILY = next((name for name in preferences if name in families), "TkDefaultFont")
+            families = ()
+        lookup = {name.casefold(): name for name in families}
+
+        def installed_family(*candidates):
+            for candidate in candidates:
+                exact = lookup.get(candidate.casefold())
+                if exact:
+                    return exact
+            # Some Windows installs expose a localized or slightly different
+            # family name. Prefer any installed SF Pro family before falling back.
+            for candidate in candidates:
+                token = candidate.casefold().replace(" ", "")
+                for actual in families:
+                    normalized = actual.casefold().replace(" ", "")
+                    if token in normalized or normalized in token:
+                        return actual
+            return None
+
+        sf_text = installed_family("SF Pro Text", "SF Pro")
+        sf_display = installed_family("SF Pro Display", "SF Pro")
+        if IS_MAC or sys.platform == "win32":
+            # Use SF Pro on both platforms. Literal family names are retained as
+            # the requested family even when a second computer lacks the font;
+            # Tk will substitute rather than preventing the app from opening.
+            FONT_TEXT_FAMILY = sf_text or sf_display or "SF Pro Text"
+            FONT_DISPLAY_FAMILY = sf_display or sf_text or "SF Pro Display"
+        else:
+            FONT_TEXT_FAMILY = (sf_text or installed_family("Segoe UI Variable Text", "Segoe UI", "DejaVu Sans", "Arial")
+                                or "TkDefaultFont")
+            FONT_DISPLAY_FAMILY = (sf_display or installed_family("Segoe UI Variable Display", "Segoe UI", "DejaVu Sans", "Arial")
+                                   or FONT_TEXT_FAMILY)
         self.title("Finance" + (" — Demo" if demo else ""))
         self.configure(bg=P["bg"])
         width = min(1480, max(1020, self.winfo_screenwidth() - 60))
@@ -2485,7 +2620,7 @@ class FinanceApp(tk.Tk):
         totals = self.snapshot.currency_totals()
         for index, currency in enumerate(CURRENCIES):
             row = tk.Frame(right, bg=P["hero"])
-            row.pack(fill="x", pady=(0, 10))
+            row.pack(fill="x", pady=(0, 9))
             dot = tk.Canvas(row, width=10, height=10, bg=P["hero"],
                             highlightthickness=0)
             dot.pack(side="left", padx=(0, 9))
@@ -2494,8 +2629,16 @@ class FinanceApp(tk.Tk):
                      "DZD": ACCOUNTS["dzd_cash"].accent}[currency]
             dot.create_oval(2, 2, 8, 8, fill=color, outline="")
             label(row, currency, 12, P["muted"], bg=P["hero"]).pack(side="left")
-            label(row, fmt(totals[currency], currency) if self.snapshot.valid else "—",
-                  13, P["text"], True, bg=P["hero"]).pack(side="right")
+            value_host = tk.Frame(row, bg=P["hero"])
+            value_host.pack(side="right")
+            label(value_host, fmt(totals[currency], currency) if self.snapshot.valid else "—",
+                  13, P["text"], True, bg=P["hero"], anchor="e").pack(fill="x")
+            equivalent = (dinar_equivalent_text(totals[currency], currency,
+                                                self.snapshot.settings)
+                          if self.snapshot.valid else "")
+            if equivalent:
+                label(value_host, equivalent, 10, P["dim"], bg=P["hero"],
+                      anchor="e").pack(fill="x", pady=(2, 0))
         rates = display_rates(self.snapshot.settings)
         quotes = "  •  ".join(
             f"1 {currency} = {compact_rate(rates[currency])} DZD"
@@ -2537,20 +2680,34 @@ class FinanceApp(tk.Tk):
                      self.snapshot.available)[key]
             text = fmt(value, account.currency) if self.snapshot.valid else "Unavailable"
             size = 27 if len(text) < 15 else 22
+            equivalent = (dinar_equivalent_text(value, account.currency,
+                                                self.snapshot.settings)
+                          if self.snapshot.valid else "")
             label(inside, text, size, P["red"] if value < ZERO else P["text"],
-                  True, bg=P["card"]).pack(fill="x", pady=(20, 5))
+                  True, bg=P["card"]).pack(
+                      fill="x", pady=(20, 3 if equivalent else 5))
+            if equivalent:
+                label(inside, equivalent, 11, P["muted"],
+                      bg=P["card"]).pack(fill="x", pady=(0, 5))
             primary_caption = "Saved" if mode == "saved" else "Available"
             label(inside, primary_caption, 10, P["dim"], bg=P["card"]).pack(fill="x")
             tk.Frame(inside, bg=P["hairline"], height=1).pack(fill="x", pady=(16, 12))
             if mode == "saved":
-                bottom_text = f"Available  {fmt(self.snapshot.available[key], account.currency)}"
+                secondary_value = self.snapshot.available[key]
+                bottom_text = f"Available  {fmt(secondary_value, account.currency)}"
             else:
                 held = self.snapshot.available[key] + self.snapshot.saved[key]
+                secondary_value = self.snapshot.saved[key] if self.snapshot.saved[key] else held
                 bottom_text = (f"Saved  {fmt(self.snapshot.saved[key], account.currency)}"
                                if self.snapshot.saved[key] else
                                f"Total held  {fmt(held, account.currency)}")
+            bottom_equivalent = (dinar_equivalent_text(
+                secondary_value, account.currency, self.snapshot.settings)
+                if self.snapshot.valid else "")
+            if bottom_equivalent:
+                bottom_text += "  •  " + bottom_equivalent
             label(inside, bottom_text if self.snapshot.valid else "Review data checks",
-                  11, P["muted"], bg=P["card"], wraplength=220,
+                  11, P["muted"], bg=P["card"], wraplength=240,
                   justify="left").pack(fill="x")
             widgets.append(box)
 
@@ -2587,12 +2744,20 @@ class FinanceApp(tk.Tk):
               bg=P["card"]).pack(side="left")
         for currency in CURRENCIES:
             row = tk.Frame(box, bg=P["card"])
-            row.pack(fill="x", padx=19, pady=(0, 10))
+            row.pack(fill="x", padx=19, pady=(0, 9))
             label(row, currency, 11, P["dim"], bg=P["card"]).pack(side="left")
             value = totals[currency]
-            label(row, fmt(value, currency) if self.snapshot.valid else "—", 15,
+            value_host = tk.Frame(row, bg=P["card"])
+            value_host.pack(side="right")
+            label(value_host, fmt(value, currency) if self.snapshot.valid else "—", 15,
                   P["red"] if value < ZERO else accent, True,
-                  bg=P["card"]).pack(side="right")
+                  bg=P["card"], anchor="e").pack(fill="x")
+            equivalent = (dinar_equivalent_text(value, currency,
+                                                self.snapshot.settings)
+                          if self.snapshot.valid else "")
+            if equivalent:
+                label(value_host, equivalent, 10, P["dim"],
+                      bg=P["card"], anchor="e").pack(fill="x", pady=(2, 0))
         tk.Frame(box, height=7, bg=P["card"]).pack()
         return box
 
@@ -2662,8 +2827,15 @@ class FinanceApp(tk.Tk):
                 color = P["green"] if kind == "income" else P["red"]
                 label(box, currency, 11, P["dim"], True,
                       bg=P["card"]).pack(fill="x", padx=20, pady=(19, 10))
-                label(box, fmt(totals[currency], currency) if self.snapshot.valid else "—",
+                value = totals[currency]
+                label(box, fmt(value, currency) if self.snapshot.valid else "—",
                       28, color, True, bg=P["card"]).pack(fill="x", padx=20)
+                equivalent = (dinar_equivalent_text(value, currency,
+                                                    self.snapshot.settings)
+                              if self.snapshot.valid else "")
+                if equivalent:
+                    label(box, equivalent, 11, P["muted"],
+                          bg=P["card"]).pack(fill="x", padx=20, pady=(4, 0))
                 label(box, "Received" if kind == "income" else "Spent", 10,
                       P["muted"], bg=P["card"]).pack(fill="x", padx=20,
                                                      pady=(6, 19))
@@ -2833,25 +3005,31 @@ class FinanceApp(tk.Tk):
 
     def _activity_row(self, parent, record, index, compact=False):
         base = P["card"] if index % 2 == 0 else P["card_alt"]
-        row = tk.Frame(parent, bg=base, height=68 if compact else 62)
+        row = tk.Frame(parent, bg=base, height=78 if compact else 72)
         row.pack(fill="x")
         row.pack_propagate(False)
         amount_color = activity_color(record)
         title_text = ("Voided • " if record.voided else "") + record.title
+        equivalent = record_dinar_equivalent(record, self.snapshot.settings)
 
         if compact:
-            icon = tk.Canvas(row, width=46, height=68, bg=base,
+            icon = tk.Canvas(row, width=46, height=78, bg=base,
                              highlightthickness=0)
             icon.pack(side="left", padx=(10, 0))
-            icon.create_oval(14, 23, 26, 35, fill=amount_color, outline="")
+            icon.create_oval(14, 29, 26, 41, fill=amount_color, outline="")
             center = tk.Frame(row, bg=base)
-            center.pack(side="left", fill="both", expand=True, padx=(4, 14), pady=12)
+            center.pack(side="left", fill="both", expand=True, padx=(4, 14), pady=13)
             label(center, title_text, 13, P["text"] if not record.voided else P["dim"],
                   True, bg=base).pack(fill="x")
             label(center, f"{record.day}  •  {record.route}", 11, P["dim"],
                   bg=base).pack(fill="x", pady=(5, 0))
-            label(row, record.amount_text, 14, amount_color, True, bg=base,
-                  anchor="e").pack(side="right", padx=18)
+            amount_host = tk.Frame(row, bg=base)
+            amount_host.pack(side="right", padx=18)
+            label(amount_host, record.amount_text, 14, amount_color, True,
+                  bg=base, anchor="e").pack(fill="x")
+            if equivalent:
+                label(amount_host, equivalent, 10, P["dim"], bg=base,
+                      anchor="e").pack(fill="x", pady=(3, 0))
         else:
             row.grid_columnconfigure(1, weight=3)
             row.grid_columnconfigure(2, weight=2)
@@ -2876,12 +3054,16 @@ class FinanceApp(tk.Tk):
             label(row, record.route, 12, P["muted"], bg=base,
                   wraplength=250, justify="left").grid(
                       row=0, column=2, sticky="w", padx=18)
-            amount_box = tk.Frame(row, bg=base, width=220)
+            amount_box = tk.Frame(row, bg=base, width=245)
             amount_box.grid(row=0, column=3, sticky="nsew")
             amount_box.grid_propagate(False)
-            label(amount_box, record.amount_text, 13, amount_color, True,
-                  bg=base, anchor="e", justify="right").pack(
-                      fill="both", expand=True, padx=18)
+            amount_inner = tk.Frame(amount_box, bg=base)
+            amount_inner.pack(fill="both", expand=True, padx=18, pady=10)
+            label(amount_inner, record.amount_text, 13, amount_color, True,
+                  bg=base, anchor="e", justify="right").pack(fill="x")
+            if equivalent:
+                label(amount_inner, equivalent, 10, P["dim"], bg=base,
+                      anchor="e", justify="right").pack(fill="x", pady=(3, 0))
 
         def open_record(event=None):
             if not self.modals:
@@ -2990,7 +3172,16 @@ class FinanceApp(tk.Tk):
             box = card(row)
             box.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 7, 0 if i == 2 else 7))
             label(box, currency + "  /  OUTSTANDING", 10, P["dim"], True).pack(fill="x", padx=20, pady=(20, 12))
-            label(box, fmt(totals[currency], currency) if self.snapshot.valid else "--", 27, P["amber"], True).pack(fill="x", padx=20, pady=(0, 22))
+            value = totals[currency]
+            equivalent = (dinar_equivalent_text(value, currency,
+                                                self.snapshot.settings)
+                          if self.snapshot.valid else "")
+            label(box, fmt(value, currency) if self.snapshot.valid else "--", 27,
+                  P["amber"], True).pack(fill="x", padx=20,
+                                         pady=(0, 4 if equivalent else 22))
+            if equivalent:
+                label(box, equivalent, 11, P["muted"]).pack(
+                    fill="x", padx=20, pady=(0, 22))
         label(parent, "Your loans", 17, bold=True).pack(fill="x", pady=(0, 15))
         loans = [r for r in self.snapshot.records if r.kind == "loan_out" and not r.voided]
         loans.sort(key=lambda r: (self.snapshot.outstanding.get(r.id, ZERO) == ZERO, r.day), reverse=False)
@@ -3002,8 +3193,15 @@ class FinanceApp(tk.Tk):
             box.pack(fill="x", pady=(0, 10))
             right = tk.Frame(box, bg=P["card"])
             right.pack(side="right", padx=20, pady=20)
-            label(right, fmt(remaining, loan.currency), 23, P["amber"] if remaining else P["green"], True).pack(anchor="e")
-            label(right, "Remaining" if remaining else "Fully repaid", 11, P["dim"]).pack(anchor="e", pady=(3, 12))
+            remaining_equivalent = dinar_equivalent_text(
+                remaining, loan.currency, self.snapshot.settings)
+            label(right, fmt(remaining, loan.currency), 23,
+                  P["amber"] if remaining else P["green"], True).pack(anchor="e")
+            if remaining_equivalent:
+                label(right, remaining_equivalent, 11, P["muted"]).pack(
+                    anchor="e", pady=(3, 0))
+            label(right, "Remaining" if remaining else "Fully repaid", 11,
+                  P["dim"]).pack(anchor="e", pady=(3, 12))
             actions = tk.Frame(right, bg=P["card"])
             actions.pack(anchor="e")
             Button(actions, "Details", lambda r=loan: DetailDialog(self, r), variant="secondary", height=32, small=True).pack(side="left")
@@ -3041,7 +3239,12 @@ class FinanceApp(tk.Tk):
         accounts = section("Accounts and opening balances", "USD bank, EUR bank, EUR cash and DZD cash. Savings stay attached to the account that holds them.")
         totals = self.snapshot.currency_totals(include_loans=True)
         label(accounts, "TOTAL TRACKED ASSETS  /  AVAILABLE + SAVED + OUTSTANDING LOANS", 10, P["dim"], True).pack(fill="x", pady=(0, 9))
-        label(accounts, "     ".join(fmt(totals[c], c) for c in CURRENCIES) if self.snapshot.valid else "Unavailable until data checks are resolved.", 20, bold=True).pack(fill="x", pady=(0, 18))
+        label(accounts, "     ".join(fmt(totals[c], c) for c in CURRENCIES) if self.snapshot.valid else "Unavailable until data checks are resolved.", 20, bold=True).pack(fill="x", pady=(0, 7))
+        tracked_dzd = dzd_equivalent(totals, self.snapshot.settings) if self.snapshot.valid else None
+        if self.snapshot.valid:
+            label(accounts, ("Estimated value  ≈ " + fmt(tracked_dzd, "DZD"))
+                  if tracked_dzd is not None else "Set USD and EUR display rates to value tracked assets in DZD.",
+                  12, P["muted"]).pack(fill="x", pady=(0, 18))
         Button(accounts, "+ Opening balance", lambda: self.open_form("opening"), variant="secondary").pack(anchor="w")
         backups = section("Backups and exports", "A full local JSON backup is made when the database opens, before this client can write. Exports contain private financial records; keep them somewhere secure.")
         buttons = tk.Frame(backups, bg=P["card"])
@@ -3071,7 +3274,7 @@ class FinanceApp(tk.Tk):
         else:
             for text in messages:
                 label(checks, text, 12, P["red"] if text in self.snapshot.errors else P["amber"], wraplength=860, justify="left").pack(fill="x", pady=(0, 12))
-        label(body, "FINANCE 2.1  /  BUILT FOR A SINGLE PERSONAL LEDGER", 10, P["dim"], True).pack(fill="x", pady=(10, 12))
+        label(body, "FINANCE " + APP_VERSION + "  /  BUILT FOR A SINGLE PERSONAL LEDGER", 10, P["dim"], True).pack(fill="x", pady=(10, 12))
 
     def open_form(self, kind, record=None, loan=None, account=None):
         if self.modals:
