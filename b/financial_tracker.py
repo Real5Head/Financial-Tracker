@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.3.0 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.4.0 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -83,7 +83,7 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -543,6 +543,8 @@ class Snapshot:
     legacy_pending: Decimal = ZERO
     fetched_at: str = field(default_factory=now_utc)
     settings: Dict[str, Any] = field(default_factory=dict)
+    # Review marks: transaction id -> {"fp": review fingerprint, "at": ISO time}.
+    checks: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     @property
     def valid(self) -> bool:
@@ -751,6 +753,142 @@ def record_payload(kind: str, values: Dict[str, Any], *, rid: Optional[str] = No
     return result
 
 
+# ---------------------------------------------------------------------------
+# Review helpers: pure functions behind the All activity checking table.
+# ---------------------------------------------------------------------------
+# Keys the app itself rewrites (loan status, edit history) do not void a tick.
+REVIEW_VOLATILE_KEYS = {"status", "repaid_date", "_history", "updated_at"}
+
+
+def review_fingerprint(record: "Record") -> str:
+    return fingerprint({k: v for k, v in record.raw.items() if k not in REVIEW_VOLATILE_KEYS})
+
+
+def check_state(record: "Record", checks: Dict[str, Dict[str, str]]) -> str:
+    """'checked', 'changed' (edited after it was ticked) or ''."""
+    mark = checks.get(record.id)
+    if not mark:
+        return ""
+    return "checked" if mark.get("fp") == review_fingerprint(record) else "changed"
+
+
+def chrono_key(record: "Record") -> Tuple[str, str, str]:
+    return (record.day, str(record.raw.get("created_at") or record.day), record.id)
+
+
+def held_delta(record: "Record", account: str) -> Decimal:
+    """Change in money physically held by one account (available + saved).
+
+    Moving money into or out of savings stays inside the same account, so it
+    does not change what the bank or wallet really holds.
+    """
+    if record.kind == "transfer":
+        delta = ZERO
+        if record.account == account:
+            delta -= record.amount
+        if record.destination == account:
+            delta += record.received
+        return delta
+    if record.account != account:
+        return ZERO
+    if record.kind in ("income", "opening", "adjustment", "loan_repaid"):
+        return record.amount
+    if record.kind in ("expense", "loan_out"):
+        return -record.amount
+    return ZERO
+
+
+def touches(record: "Record", account: str) -> bool:
+    return record.account == account or record.destination == account
+
+
+def running_balances(snapshot: Snapshot, account: str) -> Dict[str, Decimal]:
+    """Balance held by an account right after each active record, oldest first."""
+    balance, result = ZERO, {}
+    for record in sorted((r for r in snapshot.records if not r.voided and touches(r, account)),
+                         key=chrono_key):
+        balance += held_delta(record, account)
+        result[record.id] = balance
+    return result
+
+
+def balance_through(snapshot: Snapshot, account: str, last_day: Optional[str]) -> Decimal:
+    """Held balance at the end of last_day (None means everything recorded)."""
+    return sum((held_delta(r, account) for r in snapshot.records
+                if not r.voided and (last_day is None or r.day <= last_day)), ZERO)
+
+
+def duplicate_partners(snapshot: Snapshot, window_days: int = 3) -> Dict[str, List[str]]:
+    """Active records that look entered twice: same type, accounts and amounts within a few days."""
+    groups: Dict[Tuple[Any, ...], List["Record"]] = {}
+    for r in snapshot.records:
+        if r.voided or r.kind in ("opening", "adjustment"):
+            continue
+        key = (r.kind, r.account, r.destination, r.amount, r.received if r.destination else ZERO)
+        groups.setdefault(key, []).append(r)
+    partners: Dict[str, List[str]] = {}
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+        items.sort(key=chrono_key)
+        for i, a in enumerate(items):
+            for b in items[i + 1:]:
+                if (date.fromisoformat(b.day) - date.fromisoformat(a.day)).days > window_days:
+                    break
+                partners.setdefault(a.id, []).append(b.id)
+                partners.setdefault(b.id, []).append(a.id)
+    return partners
+
+
+def month_end(day: date) -> date:
+    return date.fromordinal(date.fromisoformat(month_add(day.isoformat()[:7], 1) + "-01").toordinal() - 1)
+
+
+PERIOD_MONTHS = {"month": 1, "quarter": 3, "year": 12}
+
+
+def period_for(unit: str, anchor: date) -> Tuple[Optional[date], Optional[date]]:
+    if unit == "all":
+        return None, None
+    if unit == "week":
+        start = date.fromordinal(anchor.toordinal() - anchor.weekday())
+        return start, date.fromordinal(start.toordinal() + 6)
+    if unit == "year":
+        return date(anchor.year, 1, 1), date(anchor.year, 12, 31)
+    if unit == "quarter":
+        start = date.fromisoformat(month_add(anchor.isoformat()[:7], -2) + "-01")
+        return start, month_end(anchor)
+    start = anchor.replace(day=1)
+    return start, month_end(start)
+
+
+def shift_period(start: date, end: date, unit: str, delta: int) -> Tuple[date, date]:
+    if unit in PERIOD_MONTHS:
+        months = PERIOD_MONTHS[unit]
+        new_start = date.fromisoformat(month_add(start.isoformat()[:7], delta * months) + "-01")
+        last = date.fromisoformat(month_add(new_start.isoformat()[:7], months - 1) + "-01")
+        return new_start, month_end(last)
+    span = end.toordinal() - start.toordinal() + 1
+    return (date.fromordinal(start.toordinal() + delta * span),
+            date.fromordinal(end.toordinal() + delta * span))
+
+
+def period_text(start: Optional[date], end: Optional[date], unit: str) -> str:
+    if start is None or end is None:
+        return "All time"
+    if unit == "month":
+        return f"{start:%B %Y}"
+    if unit == "year":
+        return str(start.year)
+    if unit == "quarter":
+        return f"{start:%b} – {end:%b %Y}" if start.year == end.year else f"{start:%b %Y} – {end:%b %Y}"
+    if start == end:
+        return f"{start:%a} {start.day} {start:%b %Y}"
+    if start.year == end.year:
+        return f"{start.day} {start:%b} – {end.day} {end:%b %Y}"
+    return f"{start.day} {start:%b %Y} – {end.day} {end:%b %Y}"
+
+
 @dataclass
 class Command:
     action: str
@@ -909,6 +1047,7 @@ def backup_document(snapshot: Snapshot) -> Dict[str, Any]:
             "notice": "Contains private financial records, but no database URL or password.",
             "account_definitions": {k: {"name": a.name, "currency": a.currency, "location": a.location} for k, a in ACCOUNTS.items()},
             "transactions": snapshot.raw, "legacy_settings": snapshot.settings,
+            "review_checks": snapshot.checks,
             "data_checks": {"errors": snapshot.errors, "warnings": snapshot.warnings}}
 
 
@@ -1078,8 +1217,12 @@ class Repository:
                     cur.execute("CREATE TABLE IF NOT EXISTS settings (key VARCHAR(50) PRIMARY KEY, value FLOAT)")
                     cur.execute("CREATE TABLE IF NOT EXISTS transactions (id VARCHAR(255) PRIMARY KEY, t_date VARCHAR(50), t_type VARCHAR(50), payload JSONB)")
                     cur.execute("CREATE TABLE IF NOT EXISTS finance_tracker_operations (operation_id VARCHAR(64) PRIMARY KEY, request_hash VARCHAR(64) NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+                    # Review ticks live beside the ledger, never inside a transaction's payload.
+                    cur.execute("CREATE TABLE IF NOT EXISTS finance_tracker_checks (transaction_id VARCHAR(255) PRIMARY KEY, record_fingerprint VARCHAR(64) NOT NULL, checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
                     records, settings = self._read(cur)
+                    checks = self._read_checks(cur)
             snapshot = project(records, settings)
+            snapshot.checks = checks
             # A baseline backup is REQUIRED before this client is allowed to write.
             self.folder.mkdir(parents=True, exist_ok=True, mode=0o700)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1089,6 +1232,32 @@ class Repository:
             self._prune_backups()
             self._cache(snapshot)
             return snapshot
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _read_checks(cur) -> Dict[str, Dict[str, str]]:
+        cur.execute("SELECT transaction_id, record_fingerprint, checked_at FROM finance_tracker_checks")
+        result = {}
+        for rid, fp, at in cur.fetchall():
+            result[str(rid)] = {"fp": str(fp), "at": at.isoformat() if hasattr(at, "isoformat") else str(at)}
+        return result
+
+    def set_checks(self, changes: Dict[str, Optional[str]]) -> Dict[str, Dict[str, str]]:
+        """Tick (fingerprint) or untick (None) rows. Touches no financial data."""
+        connection = self._connect()
+        try:
+            with connection:
+                with connection.cursor() as cur:
+                    self._limits(cur)
+                    for rid, fp in changes.items():
+                        if fp is None:
+                            cur.execute("DELETE FROM finance_tracker_checks WHERE transaction_id = %s", (rid,))
+                        else:
+                            cur.execute("INSERT INTO finance_tracker_checks (transaction_id, record_fingerprint, checked_at) "
+                                        "VALUES (%s, %s, NOW()) ON CONFLICT (transaction_id) DO UPDATE SET "
+                                        "record_fingerprint = EXCLUDED.record_fingerprint, checked_at = NOW()", (rid, fp))
+                    return self._read_checks(cur)
         finally:
             connection.close()
 
@@ -1115,6 +1284,8 @@ class Repository:
                 value = json.load(handle)
             snapshot = project(value["transactions"], value.get("legacy_settings", {}))
             snapshot.fetched_at = value.get("exported_at", "Unknown")
+            checks = value.get("review_checks", {})
+            snapshot.checks = checks if isinstance(checks, dict) else {}
             return snapshot
         except (OSError, ValueError, KeyError, TypeError):
             return None
@@ -1126,7 +1297,9 @@ class Repository:
                 with connection.cursor() as cur:
                     self._limits(cur)
                     records, settings = self._read(cur)
+                    checks = self._read_checks(cur)
             snapshot = project(records, settings)
+            snapshot.checks = checks
             self._cache(snapshot)
             return snapshot
         finally:
@@ -1178,6 +1351,7 @@ class Repository:
                         cur.execute("INSERT INTO finance_tracker_operations (operation_id, request_hash) VALUES (%s, %s)",
                                     (command.operation_id, command.digest))
                         snapshot = project(proposed, settings)
+                    snapshot.checks = self._read_checks(cur)
             # Do not treat a cache failure as a failed committed financial write.
             self._cache(snapshot)
             return snapshot
@@ -1194,6 +1368,7 @@ class DemoRepository:
         self.settings = copy.deepcopy(settings if settings is not None else
                                       {"display_rate": 237.0, "display_rate_eur": 240.0})
         self.operations: Dict[str, str] = {}
+        self.checks: Dict[str, Dict[str, str]] = {}
         self.lock = threading.Lock()
         self.parameters = {"host": "DEMO - no database", "dbname": "Sample records", "sslmode": "not applicable"}
         self.backup_path = None
@@ -1205,20 +1380,34 @@ class DemoRepository:
 
     def fetch(self) -> Snapshot:
         with self.lock:
-            return project(self.records, self.settings)
+            return self._snapshot()
+
+    def _snapshot(self) -> Snapshot:
+        snapshot = project(self.records, self.settings)
+        snapshot.checks = copy.deepcopy(self.checks)
+        return snapshot
+
+    def set_checks(self, changes: Dict[str, Optional[str]]) -> Dict[str, Dict[str, str]]:
+        with self.lock:
+            for rid, fp in changes.items():
+                if fp is None:
+                    self.checks.pop(rid, None)
+                else:
+                    self.checks[rid] = {"fp": fp, "at": now_utc()}
+            return copy.deepcopy(self.checks)
 
     def write(self, command: Command) -> Snapshot:
         with self.lock:
             if command.operation_id in self.operations:
                 if self.operations[command.operation_id] != command.digest:
                     raise ConflictError("Operation ID reused with different data.")
-                return project(self.records, self.settings)
+                return self._snapshot()
             if command.action == "display_rates":
                 self.settings = apply_display_rates(self.settings, command)
             else:
                 self.records, _ = apply_command(self.records, command)
             self.operations[command.operation_id] = command.digest
-            return project(self.records, self.settings)
+            return self._snapshot()
 
 
 def demo_records() -> List[Dict[str, Any]]:
@@ -2699,6 +2888,17 @@ class FinanceApp(tk.Tk):
             for key, kind in QUICK_KEYS.items():
                 self.bind(f"<{modifier}-{key}>", lambda e, k=kind: (self.open_form(k), "break")[1])
         self.bind("<FocusIn>", self._on_focus, add="+")
+        for sequence, delta in (("<Alt-Left>", -1), ("<Alt-Right>", 1)) + (
+                (("<Option-Left>", -1), ("<Option-Right>", 1)) if IS_MAC else ()):
+            try:
+                self.bind(sequence, lambda e, d=delta: self.review_step(d))
+            except tk.TclError:
+                pass
+        for modifier in modifiers:
+            self.bind(f"<{modifier}-f>", lambda e: self._focus_review_search())
+        self._review = None
+        self._review_tree = None
+        self._review_job = None
         self.bind("<Configure>", self._follow_scrim, add="+")
         self.bind("<Unmap>", lambda e: e.widget is self and self.scrim and self.scrim.withdraw(), add="+")
         self.bind("<Map>", lambda e: e.widget is self and self.modals and self.show_scrim(), add="+")
@@ -2706,6 +2906,14 @@ class FinanceApp(tk.Tk):
         self.show_connecting()
         self.after_idle(self._ensure_visible)
         self.after(80, self.startup)
+
+    def _focus_review_search(self):
+        if self.current_page == "activity" and not self.modals:
+            search = getattr(self, "_review_search", None)
+            if search is not None and search.winfo_exists():
+                search.focus_set()
+                search.select_range(0, "end")
+        return "break"
 
     def show_scrim(self):
         if os.environ.get("FINANCE_NO_DIM") == "1":
@@ -2797,6 +3005,16 @@ class FinanceApp(tk.Tk):
                   background=[("selected", P["selection"])],
                   foreground=[("selected", P["white"])])
         style.layout("Finance.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.configure("Ledger.Treeview", background=P["card"], foreground=P["text"],
+                        fieldbackground=P["card"], borderwidth=0, relief="flat",
+                        rowheight=30, font=font(12))
+        style.configure("Ledger.Treeview.Heading", background=P["surface"], foreground=P["muted"],
+                        font=font(11, True), relief="flat", borderwidth=0, padding=(8, 8))
+        style.map("Ledger.Treeview.Heading", background=[("active", P["hover"])],
+                  foreground=[("active", P["text"])])
+        style.map("Ledger.Treeview", background=[("selected", P["selection"])],
+                  foreground=[("selected", P["white"])])
+        style.layout("Ledger.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.configure("Finance.TCombobox", fieldbackground=P["field"], background=P["field"],
                         foreground=P["text"], arrowcolor=P["muted"], bordercolor=P["border"],
                         lightcolor=P["field"], darkcolor=P["field"], padding=(12, 7),
@@ -3145,6 +3363,9 @@ class FinanceApp(tk.Tk):
         if self._search_job:
             self.after_cancel(self._search_job)
             self._search_job = None
+        if getattr(self, "_review_job", None):
+            self.after_cancel(self._review_job)
+            self._review_job = None
         self._table_context = None
         # Re-rendering the same page (after a save, refresh or filter change)
         # keeps the reader where they were instead of jumping to the top.
@@ -3450,9 +3671,13 @@ class FinanceApp(tk.Tk):
             "savings": ("Savings", [("Add savings", lambda: self.open_form("savings_deposit"), "primary"),
                                     ("Release", lambda: self.open_form("savings_withdraw"), "secondary")]),
             "lending": ("Lending", [("New loan", lambda: self.open_form("loan_out"), "primary")]),
-            "activity": ("All activity", [("Export CSV", self.export_csv, "secondary")])}
+            "activity": ("All activity", [("Reset filters", self.review_reset, "secondary"),
+                                          ("Export this view", self.export_review, "secondary")])}
         title, actions = configurations[page]
         self.page_header(title, "", actions)
+        if page == "activity":
+            self.render_review()
+            return
         body = self.page_body()
         if not self.online:
             self.notice(body, "Offline snapshot. Balances may be out of date and changes are disabled.", P["red"])
@@ -3513,6 +3738,808 @@ class FinanceApp(tk.Tk):
             self.render_loans(body)
         else:
             self.activity_table(body, allowed=None, allow_scope=True)
+
+    # ------------------------------------------------------------------
+    # All activity: a dense checking table for finding mistakes.
+    # ------------------------------------------------------------------
+    REVIEW_COLUMNS = [
+        ("check", "✓", 30, "center", False),
+        ("flag", "", 34, "center", False),
+        ("date", "Date", 124, "w", False),
+        ("description", "Description", 220, "w", True),
+        ("category", "Category", 150, "w", False),
+        ("account", "Account", 175, "w", False),
+        ("in", "In", 135, "e", False),
+        ("out", "Out", 135, "e", False),
+        ("balance", "Balance", 145, "e", False),
+    ]
+    REVIEW_UNITS = [("week", "Week"), ("month", "Month"), ("quarter", "3 months"),
+                    ("year", "Year"), ("all", "All time")]
+
+    def review_state(self):
+        if getattr(self, "_review", None) is None:
+            start, end = period_for("month", date.today())
+            self._review = {"query": "", "account": "All accounts", "type": "All types",
+                            "category": "All categories", "checked": "All rows", "voided": False,
+                            "unit": "month", "start": start, "end": end, "sort": "date",
+                            "descending": False, "selected": [], "yview": 0.0, "actual": "",
+                            "only_matches": False}
+        return self._review
+
+    def review_reset(self):
+        self._review = None
+        self.render()
+
+    def review_preset(self, unit):
+        st = self.review_state()
+        anchor = st["start"] or date.today()
+        if unit == "all":
+            st["start"] = st["end"] = None
+        else:
+            today = date.today()
+            # Keep looking at the same stretch of time when switching unit,
+            # unless nothing is chosen yet, then start from today.
+            st["start"], st["end"] = period_for(unit, anchor if st["unit"] != "all" else today)
+        st["unit"], st["yview"] = unit, 0.0
+        self.render()
+
+    def review_step(self, delta):
+        st = self.review_state()
+        if self.current_page != "activity" or self.modals or st["start"] is None:
+            return
+        st["start"], st["end"] = shift_period(st["start"], st["end"], st["unit"], delta)
+        st["yview"] = 0.0
+        self.render()
+
+    def review_jump_today(self):
+        st = self.review_state()
+        unit = st["unit"] if st["unit"] in ("week", "month", "quarter", "year") else "month"
+        st["unit"] = unit
+        st["start"], st["end"] = period_for(unit, date.today())
+        self.render()
+
+    def review_custom_range(self, start_text, end_text):
+        st = self.review_state()
+        try:
+            start = date.fromisoformat(start_text.strip())
+            end = date.fromisoformat(end_text.strip())
+        except ValueError:
+            self.toast("Use YYYY-MM-DD for both dates, for example 2026-10-01.", error=True)
+            return
+        if end < start:
+            start, end = end, start
+        unit = "days"
+        # Whole calendar months step month by month, so Apr-Jun is followed by Jul-Sep.
+        if start.day == 1 and end == month_end(end):
+            months = (end.year - start.year) * 12 + end.month - start.month + 1
+            unit = {1: "month", 3: "quarter", 12: "year"}.get(months, "days")
+            if unit == "year" and start.month != 1:
+                unit = "days"
+        st["unit"], st["start"], st["end"], st["yview"] = unit, start, end, 0.0
+        self.render()
+
+    def review_sort(self, column):
+        st = self.review_state()
+        if st["sort"] == column:
+            st["descending"] = not st["descending"]
+        else:
+            st["sort"], st["descending"] = column, column in ("in", "out")
+        self._fill_review(keep_scroll=False)
+
+    def _review_account(self):
+        return ACCOUNT_NAMES.get(self.review_state()["account"])
+
+    def _review_rows(self):
+        st, snap = self.review_state(), self.snapshot
+        account = self._review_account()
+        kind = next((k for k, n in KIND_NAMES.items() if n == st["type"]), None)
+        category = None if st["category"] == "All categories" else st["category"]
+        start = st["start"].isoformat() if st["start"] else None
+        end = st["end"].isoformat() if st["end"] else None
+        query = st["query"].casefold().strip()
+        compact_query = query.replace(",", "").replace(" ", "")
+        rows = []
+        for r in snap.records:
+            if r.voided and not st["voided"]:
+                continue
+            if account and not touches(r, account):
+                continue
+            if kind and r.kind != kind:
+                continue
+            if category and not (r.kind == "expense" and expense_category(r) == category):
+                continue
+            if (start and r.day < start) or (end and r.day > end):
+                continue
+            state = check_state(r, snap.checks)
+            if st["checked"] == "Not checked" and state == "checked":
+                continue
+            if st["checked"] == "Checked" and state != "checked":
+                continue
+            if query:
+                haystack = (f"{r.title} {r.description} {r.category} {r.notes} {r.borrower} "
+                            f"{r.amount} {r.amount_text} {r.received if r.destination else ''} "
+                            f"{r.day} {day_heading(r.day)} {r.route} {KIND_NAMES[r.kind]}").casefold()
+                if query not in haystack and compact_query not in haystack.replace(",", ""):
+                    continue
+            rows.append(r)
+        return rows
+
+    def _review_match_amount(self):
+        """If a real balance was typed for the chosen account, the gap to look for."""
+        st = self.review_state()
+        account = self._review_account()
+        if not account or not st["actual"].strip():
+            return None, None
+        try:
+            actual = money(st["actual"], "Real balance", signed=True)
+        except ValidationError:
+            return None, None
+        closing = balance_through(self.snapshot, account, st["end"].isoformat() if st["end"] else None)
+        return actual - closing, closing
+
+    def _review_flows(self, record, account=None):
+        """(ins, outs) as lists of (currency, Decimal) for one record."""
+        ins, outs = [], []
+        keys = [account] if account else list(ACCOUNTS)
+        for key in keys:
+            delta = held_delta(record, key)
+            if delta > ZERO:
+                ins.append((ACCOUNTS[key].currency, delta))
+            elif delta < ZERO:
+                outs.append((ACCOUNTS[key].currency, -delta))
+        return ins, outs
+
+    def _fill_review(self, keep_scroll=True):
+        self._review_job = None
+        tree = getattr(self, "_review_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        st, snap = self.review_state(), self.snapshot
+        account = self._review_account()
+        running = running_balances(snap, account) if account else {}
+        partners = duplicate_partners(snap)
+        gap, closing = self._review_match_amount()
+        match_amount = abs(gap) if gap not in (None, ZERO) else None
+        rows = self._review_rows()
+
+        def matches(r):
+            if match_amount is None:
+                return False
+            ins, outs = self._review_flows(r, account)
+            return any(v == match_amount for _, v in ins + outs) or r.amount == match_amount
+        matched = {r.id for r in rows if matches(r)}
+        if st["only_matches"] and match_amount is not None:
+            rows = [r for r in rows if r.id in matched]
+
+        def amount_key(r, side):
+            ins, outs = self._review_flows(r, account)
+            items = ins if side == "in" else outs
+            total = ZERO
+            for currency, value in items:
+                converted = amount_in_dinars(value, currency, snap.settings)
+                total += converted if converted is not None else value
+            return total
+        sorters = {
+            "date": chrono_key,
+            "description": lambda r: r.title.casefold(),
+            "category": lambda r: (expense_category(r) if r.kind == "expense" else KIND_NAMES[r.kind]).casefold(),
+            "account": lambda r: r.route.casefold(),
+            "in": lambda r: amount_key(r, "in"), "out": lambda r: amount_key(r, "out"),
+            "balance": lambda r: running.get(r.id, ZERO),
+            "check": lambda r: check_state(r, snap.checks),
+            "flag": lambda r: (r.id in partners, r.id in matched),
+        }
+        rows.sort(key=lambda r: (sorters[st["sort"]](r), chrono_key(r)), reverse=st["descending"])
+
+        previous = set(tree.selection()) or set(st["selected"])
+        tree.delete(*tree.get_children())
+        totals_in = {c: ZERO for c in CURRENCIES}
+        totals_out = {c: ZERO for c in CURRENCIES}
+        checked_count = 0
+        for index, r in enumerate(rows):
+            state = check_state(r, snap.checks)
+            if state == "checked":
+                checked_count += 1
+            ins, outs = self._review_flows(r, account)
+            if not r.voided:
+                for currency, value in ins:
+                    totals_in[currency] += value
+                for currency, value in outs:
+                    totals_out[currency] += value
+            category = expense_category(r) if r.kind == "expense" else KIND_NAMES[r.kind]
+            if r.kind in ("savings_deposit", "savings_withdraw"):
+                category = ("Saved " if r.kind == "savings_deposit" else "Released ") + fmt(r.amount, r.currency)
+            balance = ""
+            if account:
+                # One account means one currency: the header names it, cells stay numeric.
+                balance = "voided" if r.voided else f"{running[r.id]:,.2f}" if r.id in running else ""
+                in_text = "  ".join(f"{v:,.2f}" for _, v in ins)
+                out_text = "  ".join(f"{v:,.2f}" for _, v in outs)
+            else:
+                in_text = " + ".join(fmt(v, c) for c, v in ins)
+                out_text = " + ".join(fmt(v, c) for c, v in outs)
+            flag = ("⚠" if r.id in partners else "") + ("≈" if r.id in matched else "")
+            values = ("✓" if state == "checked" else "!" if state == "changed" else "",
+                      flag, f"{r.day}  {date.fromisoformat(r.day):%a}",
+                      ("[voided] " if r.voided else "") + r.title, category, r.route,
+                      in_text, out_text, balance)
+            tone = "dupe" if r.id in partners else "match" if r.id in matched else ("odd" if index % 2 else "even")
+            tags = (tone, "voided") if r.voided else (tone,)
+            tree.insert("", "end", iid=r.id, values=values, tags=tags)
+
+        for cid, head, *_ in self.REVIEW_COLUMNS:
+            arrow = ("  ▼" if st["descending"] else "  ▲") if st["sort"] == cid else ""
+            if account and cid in ("in", "out", "balance"):
+                head = f"{head} ({ACCOUNTS[account].currency})"
+            tree.heading(cid, text=head + arrow)
+        # Size columns to their real content so amounts are never cut off.
+        widths = {}
+        for position, (cid, head, *_rest) in enumerate(self.REVIEW_COLUMNS):
+            longest = text_width(tree.heading(cid, "text") + "  ▲", 11, True)
+            for iid in tree.get_children():
+                longest = max(longest, text_width(tree.item(iid, "values")[position], 12))
+            widths[cid] = longest + 22
+        self._review_widths = widths
+        self._layout_review_columns()
+        keep = [i for i in previous if tree.exists(i)]
+        if keep:
+            tree.selection_set(keep)
+        tree.update_idletasks()
+        if keep_scroll:
+            tree.yview_moveto(st["yview"])
+        elif keep:
+            tree.see(keep[0])
+        else:
+            tree.yview_moveto(0)
+
+        labels = self._review_labels
+        count = len(rows)
+        labels["rows"].configure(text=f"{count:,}")
+        labels["rows_sub"].configure(text=f"{checked_count:,} of {count:,} checked")
+        bar = labels["progress"]
+        bar.delete("all")
+        width = max(10, bar.winfo_width())
+        rounded_rect(bar, 0, 0, width, 6, 3, fill=P["hairline"])
+        if count:
+            rounded_rect(bar, 0, 0, max(6, width * checked_count / count), 6, 3, fill=P["green"])
+
+        def money_lines(totals):
+            parts = [fmt(totals[c], c) for c in CURRENCIES if totals[c] != ZERO]
+            dinars = dzd_equivalent(totals, snap.settings)
+            return ("  ·  ".join(parts) or "—",
+                    ("≈ " + fmt(dinars, "DZD")) if dinars is not None and len(parts) > 1 else "")
+        net = {c: totals_in[c] - totals_out[c] for c in CURRENCIES}
+        for key, totals in (("in", totals_in), ("out", totals_out), ("net", net)):
+            main, sub = money_lines(totals)
+            labels[key].configure(text=main)
+            labels[key + "_sub"].configure(text=sub)
+        if account and "balance" in labels:
+            cur = ACCOUNTS[account].currency
+            opening = balance_through(snap, account, date.fromordinal(st["start"].toordinal() - 1).isoformat()) if st["start"] else ZERO
+            closing_now = balance_through(snap, account, st["end"].isoformat() if st["end"] else None)
+            labels["balance"].configure(text=f"{fmt(opening, cur)}  →  {fmt(closing_now, cur)}")
+            end_text = f"{st['end']:%d %b %Y}" if st["end"] else "today"
+            labels["balance_sub"].configure(text=f"Start of period  →  end ({end_text})")
+            if gap is None:
+                text = ("Type what the bank or wallet really shows to find the gap."
+                        if not st["actual"].strip() else "Use a number like 1250.50")
+                labels["compare"].configure(text=text, fg=P["dim"])
+            elif gap == ZERO:
+                labels["compare"].configure(text="Matches. No gap in this period.", fg=P["green"])
+            else:
+                direction = "more" if gap > ZERO else "less"
+                hits = len(matched)
+                hint = (f"{hits} row{'s' if hits != 1 else ''} with exactly {fmt(abs(gap), cur)} marked ≈"
+                        if hits else f"No row of exactly {fmt(abs(gap), cur)}. Look for a missing entry")
+                labels["compare"].configure(
+                    text=f"Real is {fmt(abs(gap), cur)} {direction} than the app. {hint}.", fg=P["amber"])
+        suffix = "" if count else "  No rows match. Widen the period or clear filters."
+        self._review_count.configure(text=f"{count:,} rows  ·  {period_text(st['start'], st['end'], st['unit'])}{suffix}")
+        self._review_selected()
+
+    def _review_selected(self, event=None):
+        tree = getattr(self, "_review_tree", None)
+        panel = getattr(self, "_review_panel", None)
+        if tree is None or panel is None or not tree.winfo_exists():
+            return
+        st = self.review_state()
+        ids = list(tree.selection())
+        st["selected"] = ids
+        for child in panel.winfo_children():
+            child.destroy()
+        inner = tk.Frame(panel, bg=P["card"])
+        inner.pack(fill="both", expand=True, padx=18, pady=18)
+        snap = self.snapshot
+        account = self._review_account()
+        records = {r.id: r for r in snap.records}
+        if not ids:
+            label(inner, "Nothing selected", 15, P["text"], True, bg=P["card"]).pack(fill="x")
+            label(inner, "Click a row, or use ↑ ↓ to move through the list. Shift-click to select a range "
+                  "and see its total.", 12, P["muted"], bg=P["card"], wraplength=228,
+                  justify="left").pack(fill="x", pady=(8, 0))
+            return
+        if len(ids) > 1:
+            chosen = [records[i] for i in ids if i in records]
+            totals_in = {c: ZERO for c in CURRENCIES}
+            totals_out = {c: ZERO for c in CURRENCIES}
+            for r in chosen:
+                if r.voided:
+                    continue
+                ins, outs = self._review_flows(r, account)
+                for c, v in ins:
+                    totals_in[c] += v
+                for c, v in outs:
+                    totals_out[c] += v
+            label(inner, f"{len(chosen)} rows selected", 16, P["text"], True, bg=P["card"]).pack(fill="x")
+            for name, totals, color in (("In", totals_in, P["green"]), ("Out", totals_out, P["red"])):
+                label(inner, name.upper(), 10, P["dim"], True, bg=P["card"]).pack(fill="x", pady=(16, 4))
+                parts = [fmt(totals[c], c) for c in CURRENCIES if totals[c] != ZERO]
+                label(inner, "\n".join(parts) or "—", 14, color, True, bg=P["card"],
+                      justify="left").pack(fill="x")
+            all_checked = all(check_state(r, snap.checks) == "checked" for r in chosen)
+            Button(inner, ("Unmark all" if all_checked else f"Mark {len(chosen)} as checked") + "  (Space)",
+                   lambda: self.review_toggle_checks(), variant="secondary" if all_checked else "primary",
+                   height=36, small=True).pack(fill="x", pady=(22, 0))
+            return
+        r = records.get(ids[0])
+        if r is None:
+            return
+        label(inner, KIND_NAMES[r.kind].upper() + ("  /  VOIDED" if r.voided else ""), 10,
+              activity_color(r), True, bg=P["card"]).pack(fill="x")
+        label(inner, r.title, 16, P["text"], True, bg=P["card"], wraplength=228,
+              justify="left").pack(fill="x", pady=(6, 2))
+        label(inner, r.amount_text, 17, activity_color(r), True, bg=P["card"], wraplength=228,
+              justify="left").pack(fill="x")
+        equivalent = record_dinar_equivalent(r, snap.settings)
+        if equivalent:
+            label(inner, equivalent, 11, P["dim"], bg=P["card"]).pack(fill="x", pady=(2, 0))
+        rows = [("Date", f"{date.fromisoformat(r.day):%A} {date.fromisoformat(r.day).day} "
+                         f"{date.fromisoformat(r.day):%B %Y}  ({r.day})"),
+                ("Category" if r.kind == "expense" else "Type",
+                 expense_category(r) if r.kind == "expense" else KIND_NAMES[r.kind]),
+                ("Account", r.route)]
+        if r.kind == "transfer":
+            rows.append(("Rate", rate_text(r.account, r.destination, r.amount, r.received)))
+        if account:
+            running = running_balances(snap, account)
+            if r.id in running:
+                rows.append((f"{ACCOUNTS[account].name} after this",
+                             fmt(running[r.id], ACCOUNTS[account].currency)))
+        if r.notes:
+            rows.append(("Notes", r.notes))
+        state = check_state(r, snap.checks)
+        mark = snap.checks.get(r.id, {})
+        when = ""
+        try:
+            when = datetime.fromisoformat(mark.get("at", "")).astimezone().strftime("%d %b %Y, %H:%M")
+        except ValueError:
+            pass
+        rows.append(("Checked", f"Yes, {when}" if state == "checked" else
+                     "Edited after it was checked" if state == "changed" else "Not yet"))
+        for heading, value in rows:
+            label(inner, heading.upper(), 9, P["dim"], True, bg=P["card"]).pack(fill="x", pady=(12, 3))
+            label(inner, value, 12, P["amber"] if heading == "Checked" and state == "changed" else P["text"],
+                  bg=P["card"], wraplength=228, justify="left").pack(fill="x")
+        partners = duplicate_partners(snap).get(r.id, [])
+        for other_id in partners[:2]:
+            other = records.get(other_id)
+            if not other:
+                continue
+            warn = tk.Frame(inner, bg="#33270F")
+            warn.pack(fill="x", pady=(14, 0))
+            label(warn, "⚠  Possible duplicate", 11, P["amber"], True, bg="#33270F").pack(
+                fill="x", padx=10, pady=(8, 2))
+            label(warn, f"{other.day}  ·  {other.title}  ·  {other.amount_text}", 11, P["text"],
+                  bg="#33270F", wraplength=210, justify="left").pack(fill="x", padx=10)
+            Button(warn, "Jump to it", lambda o=other_id: self.review_jump(o), variant="secondary",
+                   height=28, small=True).pack(anchor="w", padx=10, pady=(6, 10))
+        actions = tk.Frame(inner, bg=P["card"])
+        actions.pack(fill="x", pady=(20, 0))
+        Button(actions, ("Unmark" if state == "checked" else "Mark as checked") + "  (Space)",
+               lambda: self.review_toggle_checks(), variant="secondary" if state == "checked" else "primary",
+               height=36, small=True).pack(fill="x")
+        buttons = tk.Frame(actions, bg=P["card"])
+        buttons.pack(fill="x", pady=(8, 0))
+        if not r.voided and r.kind not in ("loan_repaid", "adjustment"):
+            Button(buttons, "Edit", lambda: self.open_form(r.kind, record=r), variant="secondary",
+                   height=34, small=True).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        Button(buttons, "Void / details", lambda: self.review_open(r.id), variant="secondary",
+               height=34, small=True).pack(side="left", fill="x", expand=True)
+
+    def review_open(self, rid=None):
+        tree = getattr(self, "_review_tree", None)
+        if rid is None and tree is not None:
+            focus = tree.focus() or (tree.selection()[0] if tree.selection() else None)
+            rid = focus
+        record = self.snapshot.by_id(rid) if rid else None
+        if record is None:
+            return
+        if self.modals:
+            self.lift_modal()
+            return
+        DetailDialog(self, record)
+
+    def review_jump(self, rid):
+        tree = self._review_tree
+        if not tree.exists(rid):
+            other = self.snapshot.by_id(rid)
+            st = self.review_state()
+            if other is None:
+                return
+            # Widen the view just enough to show it, then select it.
+            st.update({"query": "", "type": "All types", "category": "All categories",
+                       "checked": "All rows", "only_matches": False, "selected": [rid]})
+            if st["start"] and not (st["start"].isoformat() <= other.day <= st["end"].isoformat()):
+                st["start"], st["end"] = period_for(st["unit"] if st["unit"] in PERIOD_MONTHS or st["unit"] == "week" else "month",
+                                                    date.fromisoformat(other.day))
+            self.render()
+            tree = self._review_tree
+            if not tree.exists(rid):
+                self.toast("That entry is outside the account filter. Choose All accounts to see it.", error=True)
+                return
+        tree.selection_set([rid])
+        tree.focus(rid)
+        tree.see(rid)
+        tree.focus_set()
+
+    def review_toggle_checks(self, ids=None, value=None):
+        tree = getattr(self, "_review_tree", None)
+        if ids is None:
+            ids = list(tree.selection()) if tree is not None and tree.winfo_exists() else []
+        if not ids:
+            return
+        if not self.repo or not self.online or not hasattr(self.repo, "set_checks"):
+            self.toast("Reconnect to save checks. They are stored in your database so every computer sees them.", error=True)
+            return
+        records = {r.id: r for r in self.snapshot.records}
+        chosen = [records[i] for i in ids if i in records]
+        if value is None:
+            value = not all(check_state(r, self.snapshot.checks) == "checked" for r in chosen)
+        changes = {r.id: (review_fingerprint(r) if value else None) for r in chosen}
+        previous = copy.deepcopy(self.snapshot.checks)
+        for rid, fp in changes.items():
+            if fp is None:
+                self.snapshot.checks.pop(rid, None)
+            else:
+                self.snapshot.checks[rid] = {"fp": fp, "at": now_utc()}
+        st = self.review_state()
+        if tree is not None and tree.winfo_exists():
+            st["yview"] = tree.yview()[0]
+        # Moving on after ticking one row keeps the keyboard flow quick.
+        advance = value and len(chosen) == 1 and tree is not None and tree.winfo_exists()
+        self._fill_review(keep_scroll=True)
+        if advance:
+            following = tree.next(chosen[0].id)
+            if following:
+                tree.selection_set([following])
+                tree.focus(following)
+                tree.see(following)
+        repo, snapshot = self.repo, self.snapshot
+
+        def done(result, error):
+            if error is not None:
+                if self.snapshot is snapshot:
+                    self.snapshot.checks = previous
+                    if self.current_page == "activity" and not self.modals:
+                        self._fill_review()
+                self.toast("The check could not be saved. " + friendly_error(error), error=True)
+            elif repo is self.repo and self.snapshot is snapshot:
+                self.snapshot.checks = result
+        self.worker.submit(lambda: repo.set_checks(changes), done)
+
+    def render_review(self):
+        st = self.review_state()
+        snap = self.snapshot
+        outer = tk.Frame(self.content, bg=P["bg"])
+        outer.pack(fill="both", expand=True, padx=34, pady=(0, 4))
+        if not self.online:
+            self.notice(outer, "Offline snapshot. You can look through it, but ticks and changes are disabled.", P["red"])
+        if snap.errors:
+            self.notice(outer, "Some records need review in Settings > Data checks. Totals may be incomplete.", P["red"])
+
+        # Period: the stretch of time being checked.
+        nav = tk.Frame(outer, bg=P["bg"])
+        nav.pack(fill="x", pady=(0, 10))
+        stepper = card(nav, tone=P["surface"], border=False)
+        stepper.pack(side="left")
+        prev_button = Button(stepper, "‹", lambda: self.review_step(-1), variant="ghost", width=36, height=34)
+        prev_button.pack(side="left", padx=(3, 0), pady=3)
+        label(stepper, period_text(st["start"], st["end"], st["unit"]), 14, P["text"], True,
+              bg=P["surface"], width=20, anchor="center").pack(side="left", padx=4)
+        next_button = Button(stepper, "›", lambda: self.review_step(1), variant="ghost", width=36, height=34)
+        next_button.pack(side="left", padx=(0, 3), pady=3)
+        prev_button.set_enabled(st["start"] is not None)
+        next_button.set_enabled(st["start"] is not None)
+        Button(nav, "Today", self.review_jump_today, variant="secondary", height=34, small=True).pack(
+            side="left", padx=(8, 0))
+        chips = tk.Frame(nav, bg=P["bg"])
+        chips.pack(side="left", padx=(16, 0))
+        for unit, name in self.REVIEW_UNITS:
+            Button(chips, name, lambda u=unit: self.review_preset(u),
+                   variant="primary" if st["unit"] == unit else "secondary", height=34, small=True).pack(
+                side="left", padx=(0, 6))
+        custom = tk.Frame(nav, bg=P["bg"])
+        custom.pack(side="right")
+        date_entries = []
+        for i, (caption, value) in enumerate((("From", st["start"]), ("to", st["end"]))):
+            label(custom, caption, 11, P["dim"]).pack(side="left", padx=(0 if i == 0 else 8, 6))
+            shell = tk.Frame(custom, bg=P["field"], highlightthickness=1, highlightbackground=P["border"])
+            shell.pack(side="left")
+            var = tk.StringVar(value=value.isoformat() if value else "")
+            entry = tk.Entry(shell, textvariable=var, width=11, font=font(12), bg=P["field"], fg=P["text"],
+                             insertbackground=P["text"], relief="flat", bd=0, highlightthickness=0)
+            entry.pack(padx=8, pady=7)
+            date_entries.append(var)
+        apply = lambda e=None: self.review_custom_range(date_entries[0].get(), date_entries[1].get())
+        Button(custom, "Apply", apply, variant="secondary", height=34, small=True).pack(side="left", padx=(8, 0))
+        for widget in custom.winfo_children():
+            for child in [widget] + list(widget.winfo_children()):
+                if isinstance(child, tk.Entry):
+                    child.bind("<Return>", apply)
+
+        # Filters.
+        filters = tk.Frame(outer, bg=P["bg"])
+        filters.pack(fill="x", pady=(0, 10))
+        search_shell = tk.Frame(filters, bg=P["field"], highlightthickness=1, highlightbackground=P["border"])
+        search_shell.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        icon = tk.Canvas(search_shell, width=30, height=34, bg=P["field"], highlightthickness=0)
+        icon.pack(side="left")
+        icon.create_oval(10, 10, 20, 20, outline=P["dim"], width=1.5)
+        icon.create_line(19, 19, 24, 24, fill=P["dim"], width=1.5, capstyle="round")
+        search_var = tk.StringVar(value=st["query"])
+        search = tk.Entry(search_shell, textvariable=search_var, bg=P["field"], fg=P["text"],
+                          insertbackground=P["text"], relief="flat", bd=0, highlightthickness=0,
+                          font=font(12), selectbackground=P["selection"])
+        search.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=7)
+        self._review_search = search
+        ghost = label(search_shell, "Search text, amount (1250 or 1,250) or date", 11, P["dim"], bg=P["field"])
+
+        def ghost_state(*args):
+            if search_var.get():
+                ghost.place_forget()
+            else:
+                ghost.place(x=34, rely=.5, anchor="w")
+        ghost.bind("<Button-1>", lambda e: search.focus_set())
+
+        def searched(*args):
+            st["query"] = search_var.get()
+            ghost_state()
+            if getattr(self, "_review_job", None):
+                self.after_cancel(self._review_job)
+            self._review_job = self.after(160, lambda: self._fill_review(keep_scroll=False))
+        search_var.trace_add("write", searched)
+        ghost_state()
+
+        categories = list(CATEGORIES)
+        for r in snap.records:
+            if r.kind == "expense":
+                name = expense_category(r)
+                if name not in categories:
+                    categories.append(name)
+
+        def combo(key, values, width, rerender=False):
+            var = tk.StringVar(value=st[key])
+            box = ttk.Combobox(filters, textvariable=var, values=values, state="readonly", width=width,
+                               font=font(12), style="Finance.TCombobox")
+            box.pack(side="left", padx=(0, 8), ipady=2)
+
+            def changed(event=None):
+                st[key] = var.get()
+                if rerender:
+                    st["yview"] = 0.0
+                    self.render()
+                else:
+                    self._fill_review(keep_scroll=False)
+            box.bind("<<ComboboxSelected>>", changed)
+        combo("account", ["All accounts"] + [a.name for a in ACCOUNTS.values()], 13, rerender=True)
+        combo("type", ["All types"] + [KIND_NAMES[k] for k in KINDS], 13)
+        combo("category", ["All categories"] + categories, 13)
+        combo("checked", ["All rows", "Not checked", "Checked"], 11)
+        voided_var = tk.BooleanVar(value=st["voided"])
+
+        def voided_changed():
+            st["voided"] = voided_var.get()
+            self._fill_review(keep_scroll=False)
+        tk.Checkbutton(filters, text="Voided", variable=voided_var, command=voided_changed, font=font(11),
+                       bg=P["bg"], fg=P["muted"], activebackground=P["bg"], activeforeground=P["text"],
+                       selectcolor=P["field"], bd=0, highlightthickness=0).pack(side="left")
+
+        # Totals for whatever is on screen.
+        summary = tk.Frame(outer, bg=P["bg"])
+        summary.pack(fill="x", pady=(0, 10))
+        account = self._review_account()
+        boxes = [("rows", "Rows", P["text"]), ("in", "Money in", P["green"]), ("out", "Money out", P["red"]),
+                 ("net", "Net change", P["accent_dark"])]
+        if account:
+            boxes.append(("balance", ACCOUNTS[account].name + " balance", P["text"]))
+        self._review_labels = {}
+        for i, (key, title, color) in enumerate(boxes):
+            weight = 4 if key == "balance" else 3 if key in ("in", "out", "net") else 2
+            summary.grid_columnconfigure(i, weight=weight, uniform="review_summary")
+            box = card(summary, tone=P["card"])
+            box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 5, 0 if i == len(boxes) - 1 else 5))
+            label(box, title.upper(), 9, P["dim"], True, bg=P["card"]).pack(fill="x", padx=14, pady=(11, 3))
+            value = label(box, "", 14, color, True, bg=P["card"], width=1, justify="left")
+            value.pack(fill="x", padx=14)
+            value.bind("<Configure>", lambda e, w=value: w.configure(wraplength=max(60, e.width - 4)))
+            self._review_labels[key] = value
+            sub = label(box, "", 10, P["dim"], bg=P["card"], width=1)
+            sub.pack(fill="x", padx=14, pady=(2, 11 if key not in ("rows", "balance") else 4))
+            self._review_labels[key + "_sub"] = sub
+            if key == "rows":
+                bar = tk.Canvas(box, height=6, bg=P["card"], highlightthickness=0)
+                bar.pack(fill="x", padx=14, pady=(2, 12))
+                bar.bind("<Configure>", lambda e: self._fill_review_progress())
+                self._review_labels["progress"] = bar
+            if key == "balance":
+                row = tk.Frame(box, bg=P["card"])
+                row.pack(fill="x", padx=14, pady=(2, 4))
+                label(row, "Real balance", 10, P["muted"], bg=P["card"]).pack(side="left")
+                shell = tk.Frame(row, bg=P["field"], highlightthickness=1, highlightbackground=P["border"])
+                shell.pack(side="left", padx=(8, 0))
+                actual_var = tk.StringVar(value=st["actual"])
+                tk.Entry(shell, textvariable=actual_var, width=12, font=font(12), bg=P["field"], fg=P["text"],
+                         insertbackground=P["text"], relief="flat", bd=0, highlightthickness=0).pack(padx=6, pady=3)
+                only_var = tk.BooleanVar(value=st["only_matches"])
+
+                def only_changed():
+                    st["only_matches"] = only_var.get()
+                    self._fill_review(keep_scroll=False)
+                tk.Checkbutton(row, text="Only ≈ rows", variable=only_var, command=only_changed,
+                               font=font(10), bg=P["card"], fg=P["muted"], activebackground=P["card"],
+                               activeforeground=P["text"], selectcolor=P["field"], bd=0,
+                               highlightthickness=0).pack(side="left", padx=(8, 0))
+
+                def actual_changed(*args):
+                    st["actual"] = actual_var.get()
+                    if getattr(self, "_review_job", None):
+                        self.after_cancel(self._review_job)
+                    self._review_job = self.after(250, lambda: self._fill_review(keep_scroll=True))
+                actual_var.trace_add("write", actual_changed)
+                compare = label(box, "", 10, P["dim"], bg=P["card"], wraplength=360, justify="left")
+                compare.pack(fill="x", padx=14, pady=(2, 10))
+                self._review_labels["compare"] = compare
+
+        # Table and the selected-row panel.
+        main = tk.Frame(outer, bg=P["bg"])
+        main.pack(fill="both", expand=True)
+        panel = card(main, tone=P["card"], width=270)
+        if st.get("panel", True):
+            panel.pack(side="right", fill="y", padx=(10, 0))
+        panel.pack_propagate(False)
+        self._review_panel = panel
+        table_box = card(main, tone=P["card"])
+        table_box.pack(side="left", fill="both", expand=True)
+        columns = [c[0] for c in self.REVIEW_COLUMNS]
+        tree = ttk.Treeview(table_box, columns=columns, show="headings", style="Ledger.Treeview",
+                            selectmode="extended")
+        bar = ttk.Scrollbar(table_box, orient="vertical", command=tree.yview,
+                            style="Finance.Vertical.TScrollbar")
+
+        def scrolled(first, last):
+            bar.set(first, last)
+            st["yview"] = float(first)
+        tree.configure(yscrollcommand=scrolled)
+        bar.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        tree.bind("<Configure>", self._layout_review_columns, add="+")
+        for cid, head, width, anchor, stretch in self.REVIEW_COLUMNS:
+            tree.heading(cid, text=head, anchor=anchor if anchor != "center" else "center",
+                         command=lambda c=cid: self.review_sort(c))
+            tree.column(cid, width=width, minwidth=min(width, 40), anchor=anchor, stretch=stretch)
+        tree["displaycolumns"] = [c for c in columns if c != "balance" or account]
+        tree.tag_configure("even", background=P["card"])
+        tree.tag_configure("odd", background=P["card_alt"])
+        tree.tag_configure("dupe", background="#33270F")
+        tree.tag_configure("match", background="#12304D")
+        tree.tag_configure("voided", foreground=P["dim"])
+        self._review_tree = tree
+        tree.bind("<<TreeviewSelect>>", self._review_selected)
+        tree.bind("<space>", lambda e: (self.review_toggle_checks(), "break")[1])
+        tree.bind("<Return>", lambda e: (self.review_open(), "break")[1])
+
+        def clicked(event):
+            if tree.identify_region(event.x, event.y) == "cell" and tree.identify_column(event.x) == "#1":
+                row = tree.identify_row(event.y)
+                if row:
+                    self.review_toggle_checks([row])
+                    return "break"
+        tree.bind("<Button-1>", clicked)
+
+        def double(event):
+            if tree.identify_region(event.x, event.y) == "cell":
+                self.review_open(tree.identify_row(event.y))
+        tree.bind("<Double-1>", double)
+        for sequence in (("<Alt-Left>", -1), ("<Alt-Right>", 1)):
+            tree.bind(sequence[0], lambda e, d=sequence[1]: (self.review_step(d), "break")[1])
+
+        footer = tk.Frame(outer, bg=P["bg"])
+        footer.pack(fill="x", pady=(8, 0))
+        self._review_count = label(footer, "", 11, P["dim"])
+        self._review_count.pack(side="left")
+
+        def toggle_panel():
+            st["panel"] = not st.get("panel", True)
+            self.render()
+        Button(footer, "Hide details" if st.get("panel", True) else "Show details", toggle_panel,
+               variant="ghost", height=26, small=True).pack(side="left", padx=(10, 0))
+        mod, alt = ("⌘", "⌥") if IS_MAC else ("Ctrl+", "Alt+")
+        label(footer, f"↑↓ move  ·  Shift-click range  ·  Space tick  ·  Enter open  ·  "
+              f"{alt}← {alt}→ period  ·  {mod}F search  ·  ✓ checked  ! edited since  "
+              f"⚠ possible duplicate  ≈ matches the gap", 10, P["dim"]).pack(side="right")
+        self._fill_review(keep_scroll=True)
+        self.after(60, lambda: tree.winfo_exists() and (tree.focus_set() if not self.modals else None))
+
+    def _layout_review_columns(self, event=None):
+        tree = getattr(self, "_review_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        total = tree.winfo_width()
+        if total <= 50:
+            return
+        need = getattr(self, "_review_widths", {})
+        shown = list(tree["displaycolumns"])
+        fixed = {"check": 30, "flag": 34}
+        for cid in ("date", "in", "out", "balance"):
+            if cid in shown:
+                fixed[cid] = max(70, need.get(cid, 100))
+        flexible = {cid: min(need.get(cid, 120), cap) for cid, cap in (("category", 170), ("account", 190))}
+        floors = {"category": 90, "account": 100, "description": 120}
+        room = total - sum(fixed.values()) - 8
+        description = max(floors["description"], room - sum(flexible.values()))
+        overflow = sum(flexible.values()) + description - room
+        if overflow > 0:
+            for cid in ("category", "account"):
+                give = min(overflow, flexible[cid] - floors[cid])
+                flexible[cid] -= give
+                overflow -= give
+        widths = dict(fixed, **flexible, description=max(floors["description"], room - sum(flexible.values())))
+        for cid, width in widths.items():
+            tree.column(cid, width=int(width), stretch=False)
+
+    def _fill_review_progress(self):
+        labels = getattr(self, "_review_labels", {})
+        bar = labels.get("progress")
+        tree = getattr(self, "_review_tree", None)
+        if bar is None or tree is None or not bar.winfo_exists():
+            return
+        count = len(tree.get_children())
+        checked = sum(1 for i in tree.get_children() if tree.set(i, "check") == "✓")
+        bar.delete("all")
+        width = max(10, bar.winfo_width())
+        rounded_rect(bar, 0, 0, width, 6, 3, fill=P["hairline"])
+        if count and checked:
+            rounded_rect(bar, 0, 0, max(6, width * checked / count), 6, 3, fill=P["green"])
+
+    def export_review(self):
+        tree = getattr(self, "_review_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return self.export_csv()
+        path = filedialog.asksaveasfilename(parent=self, title="Export this view", defaultextension=".csv",
+                                            initialfile=f"finance-check-{date.today().isoformat()}.csv",
+                                            filetypes=[("CSV file", "*.csv")])
+        if not path:
+            return
+        def safe(value):
+            text = str(value)
+            return "'" + text if text.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")) else text
+        headings = ["Checked", "Flag", "Date", "Day", "Description", "Category", "Account", "In", "Out",
+                    "Balance after", "Notes", "ID"]
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(headings)
+                for iid in tree.get_children():
+                    values = list(tree.item(iid, "values"))
+                    record = self.snapshot.by_id(iid)
+                    flag = " + ".join(name for mark, name in (("⚠", "Possible duplicate"), ("≈", "Matches gap"))
+                                      if mark in values[1])
+                    check = {"✓": "Yes", "!": "Edited since"}.get(values[0], "")
+                    writer.writerow([check, flag] + [safe(v) for v in values[2:10]] +
+                                    [safe(record.notes if record else ""), iid])
+            self.toast("Exported exactly what is on screen, in the same order.")
+        except OSError:
+            self.toast("The CSV could not be saved. Choose a writable location.", error=True)
 
     def activity_table(self, parent, allowed=None, selected_month=False,
                        compact=False, allow_scope=False):
