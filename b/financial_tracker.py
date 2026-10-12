@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.5.0 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.5.1 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -83,7 +83,7 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -134,6 +134,50 @@ def enable_crash_diagnostics() -> None:
         faulthandler.enable(_FAULT_LOG_HANDLE, all_threads=True)
     except Exception:
         _FAULT_LOG_HANDLE = None
+
+
+PREFERENCES_FILE = DATA_DIR / "preferences.json"
+
+
+def load_preferences() -> Dict[str, Any]:
+    """Look-and-feel choices for this computer only (never financial data)."""
+    try:
+        with PREFERENCES_FILE.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_preferences(changes: Dict[str, Any]) -> None:
+    try:
+        current = load_preferences()
+        current.update(changes)
+        atomic_json(PREFERENCES_FILE, current)
+    except (OSError, ValueError) as exc:
+        write_diagnostic("Preferences could not be saved.", exc)
+
+
+def enable_crisp_windows_text() -> str:
+    """Stop Windows from stretching a blurry bitmap of the app on 125%/150% displays.
+
+    Tk lays everything out in pixels, so becoming fully DPI-aware would shrink
+    the interface. GDI scaling (Windows 10 1809+) keeps the same layout while
+    Windows draws text and shapes at the screen's real resolution.
+    Must run before the first window is created.
+    """
+    if sys.platform != "win32" or os.environ.get("FINANCE_WINDOWS_SCALING") == "legacy":
+        return "not applicable"
+    try:
+        user32 = ctypes.windll.user32
+        setter = user32.SetProcessDpiAwarenessContext
+        setter.argtypes = [ctypes.c_void_p]
+        setter.restype = ctypes.c_bool
+        if setter(ctypes.c_void_p(-5)):  # DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED
+            return "gdi-scaled"
+        return "unchanged (error %d)" % ctypes.GetLastError()
+    except (AttributeError, OSError) as exc:
+        return "unavailable (%s)" % exc.__class__.__name__
 
 
 def native_fatal_alert(title: str, message: str) -> None:
@@ -2141,7 +2185,7 @@ TYPE_GROUPS = [("all", "All", None), ("income", "Income", {"income"}),
                ("expense", "Expenses", {"expense"}), ("transfer", "Transfers", {"transfer"}),
                ("savings", "Savings", {"savings_deposit", "savings_withdraw"}),
                ("loans", "Loans", {"loan_out", "loan_repaid"}),
-               ("other", "Opening & settlements", {"opening", "adjustment"})]
+               ("other", "Opening & other", {"opening", "adjustment"})]
 GROUP_COLORS = {"all": None, "income": "income", "expense": "expense", "transfer": "transfer",
                 "savings": "savings_deposit", "loans": "loan_out", "other": "opening"}
 
@@ -2307,12 +2351,19 @@ class LedgerTable(tk.Frame):
 
     def _compute_layout(self):
         width = max(200, self.canvas.winfo_width())
-        fixed = sum(col["width"] for col in self.columns if not col.get("flex"))
         flex_cols = [col for col in self.columns if col.get("flex")]
-        room = max(sum(col.get("min", 120) for col in flex_cols), width - fixed - 8)
+        flex_min = sum(col.get("min", 120) for col in flex_cols)
+        fixed = sum(col["width"] for col in self.columns if not col.get("flex"))
+        # On a small window the fixed columns give way (down to 78%) before anything is cut off.
+        scale = 1.0
+        if width - fixed - 8 < flex_min:
+            scale = max(0.78, (width - flex_min - 8 - 32) / max(1, fixed - 32))
+        widths = {id(col): (col["width"] if col["key"] == "check" else int(col["width"] * scale))
+                  for col in self.columns if not col.get("flex")}
+        room = max(flex_min, width - sum(widths.values()) - 8)
         layout, x = [], 4
         for col in self.columns:
-            w = room // max(1, len(flex_cols)) if col.get("flex") else col["width"]
+            w = room // max(1, len(flex_cols)) if col.get("flex") else widths[id(col)]
             layout.append((col, x, w))
             x += w
         self.layout = layout
@@ -2339,6 +2390,12 @@ class LedgerTable(tk.Frame):
             self._fit.clear()
         self._fit[key] = result
         return result
+
+    def _fit_size(self, text, bold, width):
+        for size in (12, 11, 10):
+            if text_width(text, size, bold) <= width:
+                return size
+        return 10
 
     # -- drawing ----------------------------------------------------------
     def redraw(self, relayout=False):
@@ -2404,8 +2461,12 @@ class LedgerTable(tk.Frame):
                              fill=blend(color, bg, 0.2), outline="")
                 c.create_text(x + 16, mid, text=text, anchor="w", fill=color, font=font(11, True))
             elif key == "date":
-                c.create_text(x + 6, mid, text=row["day"], anchor="w", fill=P["dim"], font=font(12))
-                c.create_text(x + 44, mid, text=row["date"], anchor="w",
+                # The weekday is dropped first when the column has to narrow.
+                offset = 6
+                if w >= text_width(row["day"] + "  " + row["date"], 12) + 12:
+                    c.create_text(x + 6, mid, text=row["day"], anchor="w", fill=P["dim"], font=font(12))
+                    offset = 44
+                c.create_text(x + offset, mid, text=row["date"], anchor="w",
                               fill=P["dim"] if muted else P["text"], font=font(12))
             elif key == "description":
                 title = self._fit_text(row["title"], 12, True, w - 12)
@@ -2416,9 +2477,9 @@ class LedgerTable(tk.Frame):
                     sub = self._fit_text("  ·  " + row["sub"], 11, False, w - used - 8)
                     c.create_text(x + used, mid, text=sub, anchor="w", fill=P["dim"], font=font(11))
             elif key == "amount":
-                text = self._fit_text(row["amount"], 12, True, w - 14)
-                c.create_text(x + w - 8, mid, text=text, anchor="e",
-                              fill=P["dim"] if muted else row["amount_color"], font=font(12, True))
+                size = self._fit_size(row["amount"], True, w - 14)
+                c.create_text(x + w - 8, mid, text=self._fit_text(row["amount"], size, True, w - 14), anchor="e",
+                              fill=P["dim"] if muted else row["amount_color"], font=font(size, True))
             elif key.startswith("bal:"):
                 account = key[4:]
                 cell = row["balances"].get(account)
@@ -2426,17 +2487,23 @@ class LedgerTable(tk.Frame):
                     continue
                 text, touched, direction, negative = cell
                 focus = account == self.focus_account
+                bold = touched and not muted
+                room = w - 14
+                arrow_room = w - 26
+                # Money is never cut: the arrow goes first, then the text steps down a size.
+                show_arrow = bool(direction) and bold and text_width(text, 12, True) <= arrow_room
+                size = self._fit_size(text, bold, arrow_room if show_arrow else room)
                 if touched and not muted:
                     tint = blend(ACCOUNTS[account].accent, bg, 0.16 if not selected else 0.3)
                     c.create_rectangle(x + 2, y + 4, x + w - 2, y + self.ROW - 4, fill=tint, outline="")
-                    if direction:
+                    if show_arrow:
                         arrow = "▲" if direction > 0 else "▼"
                         c.create_text(x + 10, mid, text=arrow, anchor="w",
                                       fill=P["green"] if direction > 0 else P["red"], font=font(8))
                 ink = (P["red"] if negative else P["text"]) if (touched or focus) and not muted else \
                     (blend(P["red"], bg, 0.6) if negative else "#8E8E93")
-                c.create_text(x + w - 8, mid, text=self._fit_text(text, 12, touched, w - 26), anchor="e",
-                              fill=ink, font=font(12, touched and not muted))
+                c.create_text(x + w - 8, mid, text=self._fit_text(text, size, bold, room), anchor="e",
+                              fill=ink, font=font(size, bold))
         c.create_line(0, y + self.ROW - 1, width, y + self.ROW - 1, fill=P["hairline"])
 
     def draw_header(self):
@@ -3238,41 +3305,8 @@ class FinanceApp(tk.Tk):
 
     def __init__(self, demo=False):
         super().__init__()
-        global FONT_TEXT_FAMILY, FONT_DISPLAY_FAMILY
-        try:
-            families = tuple(tkfont.families(self))
-        except tk.TclError:
-            families = ()
-        lookup = {name.casefold(): name for name in families}
-
-        def installed_family(*candidates):
-            for candidate in candidates:
-                exact = lookup.get(candidate.casefold())
-                if exact:
-                    return exact
-            # Some Windows installs expose a localized or slightly different
-            # family name. Prefer any installed SF Pro family before falling back.
-            for candidate in candidates:
-                token = candidate.casefold().replace(" ", "")
-                for actual in families:
-                    normalized = actual.casefold().replace(" ", "")
-                    if token in normalized or normalized in token:
-                        return actual
-            return None
-
-        sf_text = installed_family("SF Pro Text", "SF Pro")
-        sf_display = installed_family("SF Pro Display", "SF Pro")
-        if IS_MAC or sys.platform == "win32":
-            # Use SF Pro on both platforms. Literal family names are retained as
-            # the requested family even when a second computer lacks the font;
-            # Tk will substitute rather than preventing the app from opening.
-            FONT_TEXT_FAMILY = sf_text or sf_display or "SF Pro Text"
-            FONT_DISPLAY_FAMILY = sf_display or sf_text or "SF Pro Display"
-        else:
-            FONT_TEXT_FAMILY = (sf_text or installed_family("Segoe UI Variable Text", "Segoe UI", "DejaVu Sans", "Arial")
-                                or "TkDefaultFont")
-            FONT_DISPLAY_FAMILY = (sf_display or installed_family("Segoe UI Variable Display", "Segoe UI", "DejaVu Sans", "Arial")
-                                   or FONT_TEXT_FAMILY)
+        self.font_choice = load_preferences().get("font", "sf")
+        self.apply_font_choice(self.font_choice)
         self.title("Finance" + (" — Demo" if demo else ""))
         self.configure(bg=P["bg"])
         width = min(1480, max(1020, self.winfo_screenwidth() - 60))
@@ -3339,6 +3373,55 @@ class FinanceApp(tk.Tk):
                 search.focus_set()
                 search.select_range(0, "end")
         return "break"
+
+    def apply_font_choice(self, choice):
+        """SF Pro everywhere by default; 'system' uses the platform's own UI font."""
+        global FONT_TEXT_FAMILY, FONT_DISPLAY_FAMILY
+        try:
+            families = tuple(tkfont.families(self))
+        except tk.TclError:
+            families = ()
+        lookup = {name.casefold(): name for name in families}
+
+        def installed_family(*candidates):
+            for candidate in candidates:
+                exact = lookup.get(candidate.casefold())
+                if exact:
+                    return exact
+            # Some Windows installs expose a localized or slightly different family name.
+            for candidate in candidates:
+                token = candidate.casefold().replace(" ", "")
+                for actual in families:
+                    normalized = actual.casefold().replace(" ", "")
+                    if token in normalized or normalized in token:
+                        return actual
+            return None
+
+        system_text = installed_family("Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", "DejaVu Sans", "Arial")
+        system_display = installed_family("Segoe UI Variable Display", "Segoe UI", "Helvetica Neue", "DejaVu Sans", "Arial")
+        sf_text = installed_family("SF Pro Text", "SF Pro")
+        sf_display = installed_family("SF Pro Display", "SF Pro")
+        if choice == "system" or not (sf_text or sf_display):
+            if IS_MAC:
+                sf_text = sf_text or ".AppleSystemUIFont"
+                FONT_TEXT_FAMILY = FONT_DISPLAY_FAMILY = sf_text
+            else:
+                FONT_TEXT_FAMILY = system_text or "TkDefaultFont"
+                FONT_DISPLAY_FAMILY = system_display or FONT_TEXT_FAMILY
+        else:
+            FONT_TEXT_FAMILY = sf_text or sf_display
+            FONT_DISPLAY_FAMILY = sf_display or sf_text
+        _FONT_CACHE.clear()
+
+    def set_font_choice(self, choice):
+        if choice == self.font_choice:
+            return
+        self.font_choice = choice
+        save_preferences({"font": choice})
+        self.apply_font_choice(choice)
+        self._style()
+        self.build_shell()
+        self.toast("Font changed on this computer.")
 
     def show_scrim(self):
         if os.environ.get("FINANCE_NO_DIM") == "1":
@@ -4165,7 +4248,7 @@ class FinanceApp(tk.Tk):
         columns = [{"key": "check", "width": 32, "sort": True},
                    {"key": "type", "title": "Type", "width": 104, "sort": True},
                    {"key": "date", "title": "Date", "width": 134, "sort": True},
-                   {"key": "description", "title": "Description", "flex": True, "min": 160, "sort": True},
+                   {"key": "description", "title": "Description", "flex": True, "min": 120, "sort": True},
                    {"key": "amount", "title": "Amount", "width": 214, "align": "e", "sort": True}]
         columns += [{"key": "bal:" + key, "width": 108} for key in ACCOUNTS]
         return columns
@@ -4617,8 +4700,15 @@ class FinanceApp(tk.Tk):
         for unit, name in self.REVIEW_UNITS:
             Chip(units, name, None, lambda u=unit: self.review_preset(u), active=st["unit"] == unit).pack(
                 side="left", padx=(0, 6))
-        custom = tk.Frame(nav, bg=P["bg"])
-        custom.pack(side="right")
+
+        def toggle_custom():
+            st["custom_open"] = not st.get("custom_open", False)
+            self.render()
+        Chip(units, "Custom dates…", None, toggle_custom,
+             active=st["unit"] == "days" or st.get("custom_open", False)).pack(side="left")
+        custom = tk.Frame(outer, bg=P["bg"])
+        if st.get("custom_open", False):
+            custom.pack(fill="x", pady=(0, 10))
         date_vars = []
         for i, (caption, value) in enumerate((("From", st["start"]), ("to", st["end"]))):
             label(custom, caption, 11, P["dim"]).pack(side="left", padx=(0 if i == 0 else 8, 6))
@@ -4723,18 +4813,18 @@ class FinanceApp(tk.Tk):
             summary.grid_columnconfigure(i, weight=weight, uniform="review_summary")
             box = card(summary, tone=P["card"])
             box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 5, 0 if i == len(boxes) - 1 else 5))
-            label(box, title.upper(), 9, P["dim"], True, bg=P["card"]).pack(fill="x", padx=14, pady=(11, 3))
+            label(box, title.upper(), 9, P["dim"], True, bg=P["card"]).pack(fill="x", padx=14, pady=(9, 2))
             value = label(box, "", 14, color, True, bg=P["card"], width=1, justify="left")
             value.pack(fill="x", padx=14)
             value.bind("<Configure>", lambda e, w=value: w.configure(wraplength=max(60, e.width - 4)))
             self._review_labels[key] = value
             sub = label(box, "", 10, P["muted"], bg=P["card"], width=1, justify="left")
-            sub.pack(fill="x", padx=14, pady=(2, 11 if key not in ("rows", "balance") else 4))
+            sub.pack(fill="x", padx=14, pady=(2, 9 if key not in ("rows", "balance") else 4))
             sub.bind("<Configure>", lambda e, w=sub: w.configure(wraplength=max(60, e.width - 4)))
             self._review_labels[key + "_sub"] = sub
             if key == "rows":
                 bar = tk.Canvas(box, height=6, bg=P["card"], highlightthickness=0)
-                bar.pack(fill="x", padx=14, pady=(2, 12))
+                bar.pack(fill="x", padx=14, pady=(2, 10))
                 bar.bind("<Configure>", lambda e: self._draw_review_progress())
                 self._review_labels["progress"] = bar
             if key == "balance":
@@ -4771,9 +4861,9 @@ class FinanceApp(tk.Tk):
         self._review_count = label(footer, "", 11, P["dim"])
         self._review_count.pack(side="left")
         mod, alt = ("⌘", "⌥") if IS_MAC else ("Ctrl+", "Alt+")
-        label(footer, f"↑↓ move  ·  Shift range  ·  Space tick  ·  Enter open  ·  "
-              f"{alt}← {alt}→ period  ·  {mod}F search", 10, P["dim"]).pack(side="right")
-        self._review_bar = card(outer, tone=P["card"], height=64)
+        label(footer, f"↑↓ move  ·  Space tick  ·  Enter open  ·  "
+              f"{alt}←→ period  ·  {mod}F search", 10, P["dim"]).pack(side="right")
+        self._review_bar = card(outer, tone=P["card"], height=60)
         self._review_bar.pack(side="bottom", fill="x", pady=(10, 0))
         self._review_bar.pack_propagate(False)
 
@@ -5208,6 +5298,14 @@ class FinanceApp(tk.Tk):
             label(inner, subtitle, 12, P["muted"], wraplength=880, justify="left").pack(fill="x", pady=(9, 17))
             sections.append(inner)
             return inner
+        looks = section("Appearance on this computer", "Saved only on this computer, so the Mac and the Windows PC can each use what reads best.")
+        choices = tk.Frame(looks, bg=P["card"])
+        choices.pack(fill="x")
+        for value, name in (("sf", "SF Pro"), ("system", "Windows / system font (Segoe UI)" if not IS_MAC else "System font")):
+            Chip(choices, name, None, lambda v=value: self.set_font_choice(v),
+                 active=self.font_choice == value).pack(side="left", padx=(0, 8))
+        label(looks, "If text looks cramped on Windows, try the system font. Both keep the same layout.",
+              11, P["dim"], bg=P["card"]).pack(fill="x", pady=(12, 0))
         conversion = section("Dinar display estimate", "Your combined DZD total includes every bank and cash account plus savings, without counting savings twice. Unpaid loans are shown under Lending, not in this cash total.")
         rates = display_rates(self.snapshot.settings)
         for currency in DISPLAY_RATE_KEYS:
@@ -5339,6 +5437,7 @@ FinancialTrackerApp = FinanceApp
 
 def main():
     enable_crash_diagnostics()
+    write_diagnostic("Windows text scaling: " + enable_crisp_windows_text())
     demo = "--demo" in sys.argv
     try:
         if not demo and psycopg2 is None:
