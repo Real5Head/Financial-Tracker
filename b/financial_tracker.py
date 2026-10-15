@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finance Tracker 2.5.1 - a single-file, dark desktop ledger for macOS/Windows.
+"""Finance Tracker 2.6.0 - a single-file, dark desktop ledger for macOS/Windows.
 
 Replace the original financial_tracker.py with this file. The existing PostgreSQL
 transactions table and ~/finance_tracker_db_config.json are supported. No new
@@ -83,7 +83,7 @@ except ImportError:
     Json = None
     parse_dsn = None
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.6.0"
 APP_NAME = "Finance"
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -96,7 +96,7 @@ LOG_FILE = LOG_DIR / "finance_tracker.log"
 _FAULT_LOG_HANDLE = None
 CURRENCIES = ("USD", "EUR", "DZD")
 KINDS = ("income", "expense", "transfer", "savings_deposit", "savings_withdraw",
-         "loan_out", "loan_repaid", "opening", "adjustment")
+         "loan_out", "loan_repaid", "borrow", "borrow_repaid", "opening", "adjustment")
 CATEGORIES = ("Essentials", "Business", "Food", "Transport", "Shopping", "Debt", "Other")
 # Keep the original setting keys. Rates are display estimates, not ledger money.
 DISPLAY_RATE_KEYS = {"USD": "display_rate", "EUR": "display_rate_eur"}
@@ -247,7 +247,8 @@ ACCOUNT_NAMES = {a.name: a.key for a in ACCOUNTS.values()}
 DEFAULT_ACCOUNT = {"USD": "usd_bank", "EUR": "eur_bank", "DZD": "dzd_cash"}
 KIND_NAMES = {"income": "Income", "expense": "Expense", "transfer": "Transfer",
               "savings_deposit": "Save", "savings_withdraw": "Release savings",
-              "loan_out": "Loan", "loan_repaid": "Repayment", "opening": "Opening balance",
+              "loan_out": "Loan", "loan_repaid": "Repayment", "borrow": "Borrowed",
+              "borrow_repaid": "Paid back", "opening": "Opening balance",
               "adjustment": "Imported settlement"}
 
 
@@ -481,6 +482,8 @@ class Record:
     borrower: str = ""
     notes: str = ""
     loan_id: str = ""
+    # For a debt payback: how much of the debt it cleared, in the debt's currency.
+    cleared: Decimal = ZERO
     voided: bool = False
     legacy: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -497,6 +500,10 @@ class Record:
             return f"Lent to {self.borrower}"
         if self.kind == "loan_repaid":
             return f"Repaid by {self.borrower}"
+        if self.kind == "borrow":
+            return f"Borrowed from {self.borrower}"
+        if self.kind == "borrow_repaid":
+            return f"Paid back {self.borrower}"
         return self.description or KIND_NAMES[self.kind]
 
     @property
@@ -509,7 +516,8 @@ class Record:
     def amount_text(self) -> str:
         if self.kind == "transfer":
             return f"{fmt(self.amount, self.currency)} \u2192 {fmt(self.received, ACCOUNTS[self.destination].currency)}"
-        prefix = "+ " if self.kind in ("income", "loan_repaid", "opening") else "- " if self.kind in ("expense", "loan_out") else ""
+        prefix = ("+ " if self.kind in ("income", "loan_repaid", "opening", "borrow") else
+                  "- " if self.kind in ("expense", "loan_out", "borrow_repaid") else "")
         return prefix + fmt(self.amount, self.currency)
 
 
@@ -568,6 +576,16 @@ def normalize(raw: Dict[str, Any]) -> Record:
         rec.amount = money(value, legacy=legacy, allow_zero=legacy and kind == "income", signed=kind == "adjustment")
     else:
         raise ValidationError(f"Unknown transaction type: {kind or '(missing)'}. No balance was assumed.")
+    if rec.kind in ("borrow", "borrow_repaid"):
+        # The person you borrowed from, and the debt a payback belongs to.
+        rec.borrower = str(raw.get("lender", ""))
+        rec.loan_id = str(raw.get("borrow_id", ""))
+        if not rec.borrower.strip():
+            raise ValidationError("A borrowing or payback has no lender.")
+        if rec.kind == "borrow_repaid":
+            if not rec.loan_id:
+                raise ValidationError("A payback has no linked debt.")
+            rec.cleared = money(raw.get("cleared"), "Amount cleared", legacy=legacy)
     if rec.kind in ("loan_out", "loan_repaid") and not rec.borrower.strip():
         raise ValidationError("A loan or repayment has no borrower.")
     if rec.kind == "loan_repaid" and not rec.loan_id:
@@ -582,6 +600,8 @@ class Snapshot:
     available: Dict[str, Decimal] = field(default_factory=lambda: {k: ZERO for k in ACCOUNTS})
     saved: Dict[str, Decimal] = field(default_factory=lambda: {k: ZERO for k in ACCOUNTS})
     outstanding: Dict[str, Decimal] = field(default_factory=dict)
+    # What you still owe on each borrowing, in that borrowing's currency.
+    owed: Dict[str, Decimal] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     legacy_pending: Decimal = ZERO
@@ -602,6 +622,22 @@ class Snapshot:
         for r in self.records:
             if not r.voided and r.kind == kind and r.day.startswith(month):
                 result[r.currency] += r.amount
+        return result
+
+    def owed_totals(self) -> Dict[str, Decimal]:
+        result = {c: ZERO for c in CURRENCIES}
+        for rid, remaining in self.owed.items():
+            r = self.by_id(rid)
+            if r:
+                result[r.currency] += remaining
+        return result
+
+    def lent_totals(self) -> Dict[str, Decimal]:
+        result = {c: ZERO for c in CURRENCIES}
+        for rid, remaining in self.outstanding.items():
+            r = self.by_id(rid)
+            if r:
+                result[r.currency] += remaining
         return result
 
     def currency_totals(self, include_loans: bool = False) -> Dict[str, Decimal]:
@@ -633,10 +669,12 @@ def project(raw_records: List[Dict[str, Any]], settings: Optional[Dict[str, Any]
     active = [r for r in snap.records if not r.voided]
     loans = {r.id: r for r in active if r.kind == "loan_out"}
     repaid = {rid: ZERO for rid in loans}
+    debts = {r.id: r for r in active if r.kind == "borrow"}
+    cleared = {rid: ZERO for rid in debts}
     for r in active:
-        if r.kind in ("income", "opening", "adjustment", "loan_repaid"):
+        if r.kind in ("income", "opening", "adjustment", "loan_repaid", "borrow"):
             snap.available[r.account] += r.amount
-        elif r.kind in ("expense", "loan_out"):
+        elif r.kind in ("expense", "loan_out", "borrow_repaid"):
             snap.available[r.account] -= r.amount
         elif r.kind == "transfer":
             snap.available[r.account] -= r.amount
@@ -657,6 +695,14 @@ def project(raw_records: List[Dict[str, Any]], settings: Optional[Dict[str, Any]
                 snap.errors.append(f"{r.id}: repayment is dated before the loan.")
             else:
                 repaid[r.loan_id] += r.amount
+        if r.kind == "borrow_repaid":
+            debt = debts.get(r.loan_id)
+            if not debt:
+                snap.errors.append(f"{r.id}: payback points to a missing or voided borrowing.")
+            elif r.day < debt.day:
+                snap.errors.append(f"{r.id}: payback is dated before the borrowing.")
+            else:
+                cleared[r.loan_id] += r.cleared
         if r.legacy and r.kind == "income" and r.currency == "USD" and r.raw.get("to_paypal"):
             snap.legacy_pending += r.amount
         elif r.legacy and r.raw.get("type") == "transfer_paypal_bank":
@@ -669,6 +715,11 @@ def project(raw_records: List[Dict[str, Any]], settings: Optional[Dict[str, Any]
         stored_status = loan.raw.get("status", "active")
         if stored_status == "repaid" and remaining > ZERO:
             snap.warnings.append(f"Loan to {loan.borrower}: marked repaid in the old app, but {fmt(remaining, loan.currency)} has no linked repayment. No cash was invented.")
+    for rid, debt in debts.items():
+        remaining = debt.amount - cleared[rid]
+        if remaining < ZERO:
+            snap.errors.append(f"{rid}: paybacks to {debt.borrower} clear more than was borrowed.")
+        snap.owed[rid] = max(ZERO, remaining)
     for k in ACCOUNTS:
         if snap.available[k] < ZERO or snap.saved[k] < ZERO:
             snap.warnings.append(f"{ACCOUNTS[k].name} has an existing negative balance. New transactions cannot worsen it.")
@@ -684,9 +735,9 @@ def total_in_dinars(snapshot: Snapshot) -> Optional[Decimal]:
 
 def record_effects(r: "Record") -> List[Tuple[str, str, Decimal]]:
     """(account, bucket, delta) pairs for one active record, matching project()."""
-    if r.kind in ("income", "opening", "adjustment", "loan_repaid"):
+    if r.kind in ("income", "opening", "adjustment", "loan_repaid", "borrow"):
         return [(r.account, "available", r.amount)]
-    if r.kind in ("expense", "loan_out"):
+    if r.kind in ("expense", "loan_out", "borrow_repaid"):
         return [(r.account, "available", -r.amount)]
     if r.kind == "transfer":
         return [(r.account, "available", -r.amount), (r.destination, "available", r.received)]
@@ -793,6 +844,13 @@ def record_payload(kind: str, values: Dict[str, Any], *, rid: Optional[str] = No
             result["status"] = "active" if kind == "loan_out" else "recorded"
         if kind == "loan_repaid":
             result["loan_id"] = text_value(values.get("loan_id"), "Loan ID", True, 255)
+        if kind in ("borrow", "borrow_repaid"):
+            result["lender"] = text_value(values.get("lender"), "Who lent it", True, 160)
+            result["status"] = "active" if kind == "borrow" else "recorded"
+        if kind == "borrow_repaid":
+            result["borrow_id"] = text_value(values.get("borrow_id"), "Debt", True, 255)
+            cleared_text = values.get("cleared") or values.get("amount")
+            result["cleared"] = str(money(cleared_text, "Amount of the debt this clears"))
     normalize(result)
     return result
 
@@ -835,9 +893,9 @@ def held_delta(record: "Record", account: str) -> Decimal:
         return delta
     if record.account != account:
         return ZERO
-    if record.kind in ("income", "opening", "adjustment", "loan_repaid"):
+    if record.kind in ("income", "opening", "adjustment", "loan_repaid", "borrow"):
         return record.amount
-    if record.kind in ("expense", "loan_out"):
+    if record.kind in ("expense", "loan_out", "borrow_repaid"):
         return -record.amount
     return ZERO
 
@@ -947,6 +1005,23 @@ def apply_display_rates(settings: Dict[str, Any], command: Command) -> Dict[str,
     return updated
 
 
+def check_payback(before: Snapshot, rec: "Record", item: Dict[str, Any]) -> None:
+    """A payback must point at an open debt and clear no more than is still owed."""
+    debt = before.by_id(rec.loan_id)
+    if not debt or debt.voided or debt.kind != "borrow":
+        raise ValidationError("That debt is no longer open. Refresh first.")
+    remaining = before.owed.get(debt.id, ZERO)
+    if remaining <= ZERO:
+        raise ValidationError(f"You have already paid {debt.borrower} back in full.")
+    if rec.day < debt.day:
+        raise ValidationError("A payback cannot be dated before the money was borrowed.")
+    if debt.currency == rec.currency and rec.cleared != rec.amount:
+        raise ValidationError("Paying back in the same currency clears exactly the amount paid.")
+    if rec.cleared > remaining:
+        raise ValidationError(f"Only {fmt(remaining, debt.currency)} is still owed to {debt.borrower}.")
+    item["lender"] = debt.borrower
+
+
 def apply_command(raw: List[Dict[str, Any]], cmd: Command) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Validate against authoritative records while the repository holds its lock."""
     before = project(raw)
@@ -973,7 +1048,30 @@ def apply_command(raw: List[Dict[str, Any]], cmd: Command) -> Tuple[List[Dict[st
             if before.outstanding.get(loan.id, ZERO) <= ZERO:
                 raise ValidationError("This loan is already fully repaid.")
             item["borrower"] = loan.borrower
+        if rec.kind == "borrow_repaid":
+            check_payback(before, rec, item)
         data.append(item)
+        changed.append(rid)
+    elif cmd.action == "convert":
+        # Re-file an old income as a borrowing, or an old expense as a debt payback.
+        if index is None:
+            raise ConflictError("This transaction no longer exists. Refresh first.")
+        old = data[index]
+        if fingerprint(old) != cmd.expected:
+            raise ConflictError("This record changed on another device. Close this window, refresh, and reopen it.")
+        old_rec = normalize(old)
+        item = copy.deepcopy(cmd.record)
+        new_rec = normalize(item)
+        allowed = {("income", "borrow"), ("expense", "borrow_repaid")}
+        if old_rec.voided or (old_rec.kind, new_rec.kind) not in allowed:
+            raise ValidationError("Only an active income can become a borrowing, and an active expense a payback.")
+        if new_rec.kind == "borrow_repaid":
+            check_payback(before, new_rec, item)
+        item["created_at"] = old.get("created_at", old.get("date", now_utc()))
+        prior = {k: v for k, v in old.items() if k != "_history"}
+        item["_history"] = list(old.get("_history", [])) + [{"at": now_utc(), "action": "convert", "before": prior}]
+        item["updated_at"] = now_utc()
+        data[index] = item
         changed.append(rid)
     elif cmd.action in ("replace", "void", "restore"):
         if index is None:
@@ -985,8 +1083,11 @@ def apply_command(raw: List[Dict[str, Any]], cmd: Command) -> Tuple[List[Dict[st
         if cmd.action == "replace":
             if old_rec.voided:
                 raise ValidationError("Restore a voided transaction before editing it.")
-            if old_rec.kind in ("loan_repaid", "adjustment"):
+            if old_rec.kind in ("loan_repaid", "borrow_repaid", "adjustment"):
                 raise ValidationError("This record cannot be edited. Void a repayment and record the correction instead.")
+            if old_rec.kind == "borrow" and any(r.kind == "borrow_repaid" and r.loan_id == rid and not r.voided
+                                                for r in before.records):
+                raise ValidationError("A debt with paybacks cannot be edited. Void its paybacks first.")
             if old_rec.kind == "loan_out" and any(r.kind == "loan_repaid" and r.loan_id == rid and not r.voided for r in before.records):
                 raise ValidationError("A loan with repayments cannot be edited. Correct its repayments first.")
             item = copy.deepcopy(cmd.record)
@@ -1007,6 +1108,13 @@ def apply_command(raw: List[Dict[str, Any]], cmd: Command) -> Tuple[List[Dict[st
                 linked = before.by_id(old_rec.loan_id)
                 if not linked or linked.voided:
                     raise ValidationError("The loan for this repayment is voided. Restore the loan first.")
+            if target and old_rec.kind == "borrow" and any(
+                    r.kind == "borrow_repaid" and r.loan_id == rid and not r.voided for r in before.records):
+                raise ValidationError("This debt has paybacks. Void its paybacks first, then the debt.")
+            if not target and old_rec.kind == "borrow_repaid":
+                linked = before.by_id(old_rec.loan_id)
+                if not linked or linked.voided:
+                    raise ValidationError("The debt for this payback is voided. Restore the debt first.")
             item["voided"] = target
             item["voided_at"] = now_utc() if target else None
         # Preserve every previous revision. Do not nest its previous history again.
@@ -1041,16 +1149,18 @@ def apply_command(raw: List[Dict[str, Any]], cmd: Command) -> Tuple[List[Dict[st
     for rid_changed in changed:
         for snap in (before, after):
             r = snap.by_id(rid_changed)
-            if r and r.kind == "loan_repaid":
+            if r and r.kind in ("loan_repaid", "borrow_repaid"):
                 affected_loans.add(r.loan_id)
-            elif r and r.kind == "loan_out":
+            elif r and r.kind in ("loan_out", "borrow"):
                 affected_loans.add(r.id)
     for i, item in enumerate(data):
         if item.get("id") in affected_loans and not item.get("voided"):
-            remaining = after.outstanding.get(item["id"], ZERO)
+            is_debt = item.get("type") == "borrow"
+            remaining = (after.owed if is_debt else after.outstanding).get(item["id"], ZERO)
             item["status"] = "repaid" if remaining == ZERO else "active"
             if remaining == ZERO:
-                repayments = [r.day for r in after.records if r.kind == "loan_repaid" and r.loan_id == item["id"] and not r.voided]
+                payback_kind = "borrow_repaid" if is_debt else "loan_repaid"
+                repayments = [r.day for r in after.records if r.kind == payback_kind and r.loan_id == item["id"] and not r.voided]
                 item["repaid_date"] = max(repayments) if repayments else item.get("date")
             else:
                 item.pop("repaid_date", None)
@@ -1486,6 +1596,14 @@ def demo_records() -> List[Dict[str, Any]]:
     add("savings_deposit", account="eur_bank", amount="400", description="Equipment reserve")
     loan = add("loan_out", account="eur_bank", amount="200", borrower="Samir", description="Short-term loan")
     add("loan_repaid", account="eur_cash", amount="50", borrower="Samir", loan_id=loan, description="First repayment")
+    two_months_ago = month_add(month[:7], -2) + "-12"
+    old_debt = add("borrow", account="eur_cash", amount="100", lender="Wassim", description="Train tickets",
+                   date=two_months_ago)
+    add("borrow_repaid", account="eur_cash", amount="100", lender="Wassim", borrow_id=old_debt,
+        date=month_add(month[:7], -1) + "-03")
+    debt = add("borrow", account="dzd_cash", amount="20000", lender="Malak", description="To pay Sidou")
+    add("borrow_repaid", account="dzd_cash", amount="5000", lender="Malak", borrow_id=debt)
+    add("borrow_repaid", account="eur_cash", amount="30", cleared="7200", lender="Malak", borrow_id=debt)
     return rows
 
 
@@ -1569,6 +1687,8 @@ ACTIVITY_COLORS = {
     "savings_deposit": P["cyan"],
     "savings_withdraw": "#5DEB8B",
     "loan_out": P["amber"],
+    "borrow": "#FF6FAE",
+    "borrow_repaid": "#FF9BC9",
     "loan_repaid": P["green"],
     "opening": P["purple"],
     "adjustment": P["purple"],
@@ -2179,15 +2299,17 @@ def blend(color: str, background: str, amount: float) -> str:
 
 KIND_BADGES = {"income": "Income", "expense": "Expense", "transfer": "Transfer",
                "savings_deposit": "To savings", "savings_withdraw": "From savings",
-               "loan_out": "Loan", "loan_repaid": "Repaid", "opening": "Opening",
+               "loan_out": "Lent", "loan_repaid": "Repaid", "borrow": "Borrowed",
+               "borrow_repaid": "Paid back", "opening": "Opening",
                "adjustment": "Settlement"}
 TYPE_GROUPS = [("all", "All", None), ("income", "Income", {"income"}),
                ("expense", "Expenses", {"expense"}), ("transfer", "Transfers", {"transfer"}),
                ("savings", "Savings", {"savings_deposit", "savings_withdraw"}),
-               ("loans", "Loans", {"loan_out", "loan_repaid"}),
+               ("loans", "Lent", {"loan_out", "loan_repaid"}),
+               ("debts", "Borrowed", {"borrow", "borrow_repaid"}),
                ("other", "Opening & other", {"opening", "adjustment"})]
 GROUP_COLORS = {"all": None, "income": "income", "expense": "expense", "transfer": "transfer",
-                "savings": "savings_deposit", "loans": "loan_out", "other": "opening"}
+                "savings": "savings_deposit", "loans": "loan_out", "debts": "borrow", "other": "opening"}
 
 
 class Chip(tk.Canvas):
@@ -2651,6 +2773,8 @@ def draw_icon(canvas, name, color, ox=0, oy=0):
         l([8, 11, 10, 14, 15, 9])
     elif name == "lending":
         r(7, 2, 15, 10, True); l([3, 20, 3, 17, 7, 14, 15, 14, 19, 17, 19, 20])
+    elif name == "borrowing":
+        r(3, 4, 11, 12, True); l([1, 20, 1, 18, 4, 15, 10, 15, 13, 18, 13, 20]); l([18, 3, 18, 13]); l([15, 10, 18, 13, 21, 10])
     elif name == "settings":
         for y, x in [(5, 8), (11, 16), (18, 7)]:
             l([3, y, 20, y], 1.4); r(x-2, y-2, x+2, y+2, True)
@@ -2664,7 +2788,7 @@ class NavButton(tk.Canvas):
         self.page, self.text, self.command = page, text, command
         self.active = False
         self.hovered = False
-        super().__init__(parent, height=44, bg=parent.cget("bg"), bd=0,
+        super().__init__(parent, height=40, bg=parent.cget("bg"), bd=0,
                          highlightthickness=0, takefocus=1)
         safe_cursor(self, True)
         self.bind("<Configure>", self._draw)
@@ -2868,8 +2992,9 @@ class DisplayRatesDialog(Modal):
 
 
 class TransactionDialog(Modal):
-    def __init__(self, app, kind, record=None, loan=None, account=None):
-        self.kind, self.record, self.loan = kind, record, loan
+    def __init__(self, app, kind, record=None, loan=None, account=None, convert=None):
+        self.kind, self.record, self.loan, self.convert = kind, record, loan, convert
+        self.debt_choices: Dict[str, str] = {}
         self.fields: Dict[str, Field] = {}
         self.pending: Optional[Command] = None
         self.saving = False
@@ -2877,7 +3002,8 @@ class TransactionDialog(Modal):
         self._preview_guard = False
         titles = {"income": "Record income", "expense": "Record an expense", "transfer": "Move money",
                   "savings_deposit": "Add to savings", "savings_withdraw": "Release savings",
-                  "loan_out": "Record a loan", "loan_repaid": "Record a repayment", "opening": "Add an opening balance"}
+                  "loan_out": "Record a loan", "loan_repaid": "Record a repayment", "opening": "Add an opening balance",
+                  "borrow": "Money you borrowed", "borrow_repaid": "Pay back a debt"}
         subtitles = {
             "income": "Enter the amount that actually arrived. No fees or pending balance.",
             "expense": "Choose the account you paid from and record the actual amount.",
@@ -2886,13 +3012,27 @@ class TransactionDialog(Modal):
             "savings_withdraw": "Return reserved money to the same account's available balance.",
             "loan_out": "Track money lent to someone without counting it as an expense.",
             "loan_repaid": "Record a partial or full repayment in the loan's original currency.",
-            "opening": "Record money you already had before tracking. It is not counted as income."}
-        super().__init__(app, ("Edit " + KIND_NAMES[kind].lower()) if record else titles[kind], subtitles[kind], height=750 if kind == "transfer" else 710)
-        chosen = account or (record.account if record else loan.account if loan else "usd_bank")
+            "opening": "Record money you already had before tracking. It is not counted as income.",
+            "borrow": "The money lands in the account you received it in. It is a debt, not income.",
+            "borrow_repaid": "Pay from any account. If the currency differs from the debt, enter how much of the debt it cleared."}
+        if convert is not None:
+            title = "Convert to borrowing" if kind == "borrow" else "Convert to a debt payback"
+            subtitle = (f"Re-files \u201c{convert.title}\u201d ({convert.amount_text}, {convert.day}). Balances stay the same; "
+                        "it stops counting as " + ("income." if kind == "borrow" else "an expense."))
+        else:
+            title = ("Edit " + KIND_NAMES[kind].lower()) if record else titles[kind]
+            subtitle = subtitles[kind]
+        super().__init__(app, title, subtitle, height=750 if kind == "transfer" else 710)
+        source = record or convert
+        chosen = account or (source.account if source else loan.account if loan and kind != "borrow_repaid" else "usd_bank")
+        if kind in ("borrow", "borrow_repaid") and not source and account is None:
+            chosen = loan.account if loan else "dzd_cash"
         if kind == "expense" and account is None and record is None:
             chosen = "dzd_cash"
         if kind == "transfer":
             self._build_transfer(record, chosen)
+        elif kind in ("borrow", "borrow_repaid"):
+            self._build_debt(source, chosen)
         else:
             if kind in ("income", "expense", "opening"):
                 self.add_field("description", "Source / description" if kind == "income" else "Description",
@@ -2921,7 +3061,7 @@ class TransactionDialog(Modal):
                        variant="secondary", small=True, height=32).pack(side="right", anchor="n", padx=(12, 0))
             self.balance_hint = label(hint_row, "", 12, P["muted"], wraplength=470, justify="left")
             self.balance_hint.pack(side="left", fill="x", expand=True)
-        date_field = DateField(self.body, "Date", record.day if record else date.today().isoformat())
+        date_field = DateField(self.body, "Date", source.day if source else date.today().isoformat())
         date_field.pack(fill="x", pady=(0, 15))
         self.fields["date"] = date_field
         if kind == "transfer":
@@ -2929,10 +3069,11 @@ class TransactionDialog(Modal):
             self.add_field("description", "Description (optional)", record.description if record else "", parent=left)
             self.add_field("notes", "Notes (optional)", record.notes if record else "", parent=right)
         else:
-            self.add_field("notes", "Notes (optional)", record.notes if record else "")
+            self.add_field("notes", "Notes (optional)", source.notes if source else "")
         self.cancel_button = Button(self.buttons, "Cancel", self.close, variant="secondary")
         self.cancel_button.pack(side="left")
-        self.save_button = Button(self.buttons, "Save changes" if record else "Save transaction", self.save, width=172)
+        self.save_button = Button(self.buttons, "Convert" if convert else "Save changes" if record else "Save transaction",
+                                  self.save, width=172)
         self.save_button.pack(side="right")
         self.update_preview()
         self.bind("<Control-Return>", lambda e: self.save())
@@ -2940,9 +3081,132 @@ class TransactionDialog(Modal):
             self.bind("<Command-Return>", lambda e: self.save())
         self.fit()
         focus_key = "amount_sent" if kind == "transfer" else "description" if "description" in self.fields else "amount"
-        if kind == "loan_repaid":
+        if kind == "loan_repaid" or (kind == "borrow_repaid" and "amount" in self.fields):
             focus_key = "amount"
+        if kind == "borrow":
+            focus_key = "lender"
+        if kind == "borrow_repaid" and not self.debt_choices and not self.loan:
+            self.save_button.set_enabled(False)
         self.after(80, self.fields[focus_key].input.focus_set)
+
+    # -- borrowing ----------------------------------------------------------
+    def _build_debt(self, source, chosen):
+        snap = self.app.snapshot
+        names = [a.name for a in ACCOUNTS.values()]
+        if self.kind == "borrow":
+            left, right = self.columns()
+            self.add_field("lender", "Who lent it to you?", source.borrower if source and self.kind == source.kind else "",
+                           parent=left)
+            description = source.description if source and source.kind != "borrow" else (source.description if source else "")
+            self.add_field("description", "What it was for (optional)", description, parent=right)
+            self.add_field("amount", "Amount received", str(source.amount) if source else "", large=True, placeholder="0.00")
+            self.fields["amount"].var.trace_add("write", self.update_preview)
+            self.add_field("account", "Received in", ACCOUNTS[chosen].name, choices=names)
+            self.fields["account"].input.bind("<<ComboboxSelected>>", self.update_preview)
+        else:
+            if self.loan is not None:
+                owed = snap.owed.get(self.loan.id, ZERO)
+                box = card(self.body)
+                box.pack(fill="x", pady=(0, 15))
+                label(box, "PAYING BACK", 10, P["dim"], True).pack(fill="x", padx=16, pady=(12, 2))
+                label(box, f"{self.loan.borrower}  \u00b7  {fmt(owed, self.loan.currency)} still owed", 15,
+                      P["text"], True).pack(fill="x", padx=16, pady=(0, 12))
+            else:
+                open_debts = [r for r in snap.records if r.kind == "borrow" and not r.voided
+                              and snap.owed.get(r.id, ZERO) > ZERO]
+                open_debts.sort(key=lambda r: (r.borrower.casefold(), r.day))
+                for r in open_debts:
+                    text = f"{r.borrower}  \u00b7  {fmt(snap.owed[r.id], r.currency)} left  \u00b7  borrowed {r.day}"
+                    self.debt_choices[text] = r.id
+                if open_debts:
+                    self.add_field("debt", "Which debt?", next(iter(self.debt_choices)), choices=list(self.debt_choices))
+                    self.fields["debt"].input.bind("<<ComboboxSelected>>", self.update_preview)
+                else:
+                    label(self.body, "There is no open debt to pay back. Record the borrowing first "
+                          "(or convert the old income where you got the money).", 13, P["amber"],
+                          wraplength=560, justify="left").pack(fill="x", pady=(0, 15))
+            left, right = self.columns()
+            self.add_field("account", "Paid from", ACCOUNTS[chosen].name, choices=names, parent=left)
+            self.fields["account"].input.bind("<<ComboboxSelected>>", self.update_preview)
+            self.add_field("amount", "Amount paid", str(source.amount) if source else "", parent=right,
+                           placeholder="0.00")
+            self.fields["amount"].var.trace_add("write", self.update_preview)
+            self.add_field("cleared", "Clears from the debt", str(source.cleared) if source and source.kind == "borrow_repaid" else "",
+                           placeholder="0.00",
+                           hint="Only needed when you pay in another currency than you borrowed.")
+            self.fields["cleared"].var.trace_add("write", self.update_preview)
+            Button(self.body, "Pay off everything that is left", self.pay_off, variant="secondary", small=True,
+                   height=32).pack(anchor="w", pady=(0, 12))
+        rate_card = card(self.body)
+        rate_card.pack(fill="x", pady=(0, 15))
+        self.balance_hint = label(rate_card, "", 12, P["muted"], wraplength=560, justify="left")
+        self.balance_hint.pack(fill="x", padx=16, pady=12)
+        self.rate_label = None
+
+    def selected_debt(self):
+        if self.loan is not None:
+            return self.loan
+        if "debt" in self.fields:
+            return self.app.snapshot.by_id(self.debt_choices.get(self.fields["debt"].get(), ""))
+        return None
+
+    def pay_off(self):
+        if self.pending or self.saving:
+            return
+        debt = self.selected_debt()
+        if debt is None:
+            return
+        owed = self.app.snapshot.owed.get(debt.id, ZERO)
+        self.fields["cleared"].set(str(owed))
+        if ACCOUNTS[account_key(self.fields["account"].get())].currency == debt.currency:
+            self.fields["amount"].set(str(owed))
+
+    def _debt_preview(self, src, available):
+        snap = self.app.snapshot
+        cur = ACCOUNTS[src].currency
+        lines = []
+        try:
+            amount = money(self.fields["amount"].get())
+        except ValidationError:
+            amount = None
+        if self.kind == "borrow":
+            line = f"{ACCOUNTS[src].name}: {fmt(available[src], cur)} now"
+            if amount is not None:
+                line += f"  \u2192  {fmt(available[src] + amount, cur)} after"
+            lines.append(line)
+            lines.append("You will owe this amount until you pay it back. It is not counted as income.")
+            self.balance_hint.configure(text="\n".join(lines), fg=P["muted"])
+            return
+        debt = self.selected_debt()
+        cleared_field = self.fields["cleared"]
+        if debt is None:
+            self.balance_hint.configure(text="Choose the debt this payment belongs to.", fg=P["amber"])
+            return
+        same = debt.currency == cur
+        cleared_field.title_label.configure(text=f"Clears from the debt ({debt.currency})")
+        cleared_field.enable(not same and not self.saving and self.pending is None)
+        if same and amount is not None and cleared_field.get() != str(amount):
+            self._preview_guard = True
+            cleared_field.set(str(amount))
+            self._preview_guard = False
+        owed = snap.owed.get(debt.id, ZERO)
+        lines.append(f"Still owed to {debt.borrower}: {fmt(owed, debt.currency)}")
+        try:
+            cleared = money(cleared_field.get())
+        except ValidationError:
+            cleared = amount if same else None
+        if cleared is not None:
+            left_after = owed - cleared
+            lines.append(f"After this payment: {fmt(max(ZERO, left_after), debt.currency)} left"
+                         + ("  \u2713 fully paid" if left_after == ZERO else "")
+                         + ("  (more than you owe)" if left_after < ZERO else ""))
+            if not same and amount:
+                lines.append("Rate used: " + rate_text(src, debt.account, amount, cleared))
+        if amount is not None:
+            lines.append(f"{ACCOUNTS[src].name}: {fmt(available[src], cur)}  \u2192  {fmt(available[src] - amount, cur)}")
+        over = cleared is not None and cleared > owed
+        short = amount is not None and amount > available[src]
+        self.balance_hint.configure(text="\n".join(lines), fg=P["red"] if over or short else P["muted"])
 
     def columns(self):
         row = tk.Frame(self.body, bg=P["bg"])
@@ -3026,21 +3290,10 @@ class TransactionDialog(Modal):
     def preview_balances(self):
         available, saved = dict(self.app.snapshot.available), dict(self.app.snapshot.saved)
         # An edit replaces the old effect; it is not an additional transaction.
-        rec = self.record
+        rec = self.record or self.convert
         if rec and not rec.voided:
-            if rec.kind in ("income", "opening", "adjustment", "loan_repaid"):
-                available[rec.account] -= rec.amount
-            elif rec.kind in ("expense", "loan_out"):
-                available[rec.account] += rec.amount
-            elif rec.kind == "transfer":
-                available[rec.account] += rec.amount
-                available[rec.destination] -= rec.received
-            elif rec.kind == "savings_deposit":
-                available[rec.account] += rec.amount
-                saved[rec.account] -= rec.amount
-            elif rec.kind == "savings_withdraw":
-                available[rec.account] -= rec.amount
-                saved[rec.account] += rec.amount
+            for account, bucket, delta in record_effects(rec):
+                (available if bucket == "available" else saved)[account] -= delta
         return available, saved
 
     def fill_max(self):
@@ -3063,6 +3316,9 @@ class TransactionDialog(Modal):
             key = "from_account" if self.kind == "transfer" else "account"
             src = account_key(self.fields[key].get())
             available, saved = self.preview_balances()
+            if self.kind in ("borrow", "borrow_repaid"):
+                self._debt_preview(src, available)
+                return
             current = (saved if self.kind == "savings_withdraw" else available)[src]
             current_equivalent = dinar_equivalent_text(
                 current, ACCOUNTS[src].currency, self.app.snapshot.settings)
@@ -3156,12 +3412,20 @@ class TransactionDialog(Modal):
                 if not self.app.can_write():
                     raise ValidationError("Reconnect or refresh successfully before saving a new transaction.")
                 values = {key: field_.get() for key, field_ in self.fields.items()}
-                if self.loan:
+                if self.kind == "borrow_repaid":
+                    debt = self.selected_debt()
+                    if debt is None:
+                        raise ValidationError("Choose the debt this payment belongs to.")
+                    values["borrow_id"], values["lender"] = debt.id, debt.borrower
+                    if ACCOUNTS[account_key(values.get("account", ""))].currency == debt.currency:
+                        values["cleared"] = values.get("amount")
+                elif self.loan:
                     values["loan_id"] = self.loan.id
                     values["borrower"] = self.loan.borrower
-                payload = record_payload(self.kind, values, rid=self.record.id if self.record else None)
-                self.pending = Command("replace" if self.record else "add", payload,
-                                       expected=fingerprint(self.record.raw) if self.record else "")
+                base = self.record or self.convert
+                payload = record_payload(self.kind, values, rid=base.id if base else None)
+                action = "convert" if self.convert else "replace" if self.record else "add"
+                self.pending = Command(action, payload, expected=fingerprint(base.raw) if base else "")
             except ValidationError as exc:
                 self.error.configure(text=str(exc))
                 return
@@ -3218,10 +3482,27 @@ class DetailDialog(Modal):
                 remaining, record.currency, app.snapshot.settings)
             if remaining_equivalent:
                 fields.append(("Remaining in dinars", remaining_equivalent))
+        if record.kind == "borrow":
+            owed = app.snapshot.owed.get(record.id, ZERO)
+            fields.append(("Still owed", fmt(owed, record.currency) if owed else "Paid back in full"))
+            if record.description:
+                fields.append(("What it was for", record.description))
+        if record.kind == "borrow_repaid":
+            debt = app.snapshot.by_id(record.loan_id)
+            if debt:
+                fields.append(("Cleared from the debt", fmt(record.cleared, debt.currency)))
         if record.kind == "expense":
             fields.append(("Category", record.category or "Other"))
         if record.notes:
             fields.append(("Notes", record.notes))
+        if not record.voided:
+            after = all_running_balances(app.snapshot).get(record.id)
+            if after:
+                touched = [k for k in ACCOUNTS if touches(record, k)]
+                parts = [f"{ACCOUNTS[k].name} {fmt(after[k], ACCOUNTS[k].currency)}" for k in touched]
+                others = [f"{ACCOUNTS[k].name} {fmt(after[k], ACCOUNTS[k].currency)}" for k in ACCOUNTS if k not in touched]
+                fields.append(("Balance right after", "   \u00b7   ".join(parts) +
+                               ("\n" + "   \u00b7   ".join(others) if others else "")))
         fields.append(("Record ID", record.id))
         fields.append(("Revisions retained", str(len(record.raw.get("_history", [])))))
         for heading, value in fields:
@@ -3236,11 +3517,18 @@ class DetailDialog(Modal):
                                   variant="secondary" if record.voided else "danger")
         self.void_button.pack(side="right")
         self.edit_button = None
-        if not record.voided and record.kind not in ("loan_repaid", "adjustment"):
+        if not record.voided and record.kind not in ("loan_repaid", "borrow_repaid", "adjustment"):
             self.edit_button = Button(self.buttons, "Edit", self.edit, variant="secondary")
             self.edit_button.pack(side="right", padx=(0, 8))
+        actions = tk.Frame(self.body, bg=P["bg"])
+        actions.pack(anchor="w", pady=(0, 16))
         if record.kind == "loan_out" and not record.voided and app.snapshot.outstanding.get(record.id, ZERO) > ZERO:
-            Button(self.body, "Record repayment", self.repay, width=190).pack(anchor="w", pady=(0, 16))
+            Button(actions, "Record repayment", self.repay, width=190).pack(side="left", padx=(0, 8))
+        if record.kind == "borrow" and not record.voided and app.snapshot.owed.get(record.id, ZERO) > ZERO:
+            Button(actions, "Pay back", self.pay_back, width=150).pack(side="left", padx=(0, 8))
+        if record.kind in ("income", "expense") and not record.voided and app.can_write():
+            Button(actions, "Convert to borrowing" if record.kind == "income" else "Convert to debt payback",
+                   self.convert, variant="secondary").pack(side="left")
         self.void_button.set_enabled(app.can_write())
         if self.edit_button:
             self.edit_button.set_enabled(app.can_write())
@@ -3259,6 +3547,20 @@ class DetailDialog(Modal):
         record = self.record
         self.close()
         self.app.open_form("loan_repaid", loan=record)
+
+    def pay_back(self):
+        if self.saving or self.pending:
+            return
+        record = self.record
+        self.close()
+        self.app.open_form("borrow_repaid", loan=record)
+
+    def convert(self):
+        if self.saving or self.pending:
+            return
+        record = self.record
+        self.close()
+        self.app.open_form("borrow" if record.kind == "income" else "borrow_repaid", convert=record)
 
     def change_state(self):
         if self.saving:
@@ -3294,13 +3596,14 @@ class DetailDialog(Modal):
 
 QUICK_ADD = [("expense", "Expense"), ("income", "Income"), ("transfer", "Transfer"), (None, None),
              ("savings_deposit", "Add to savings"), ("savings_withdraw", "Release savings"), (None, None),
-             ("loan_out", "Loan"), ("opening", "Opening balance")]
+             ("loan_out", "Lend money"), ("borrow", "Borrowed money"), ("borrow_repaid", "Pay back a debt"),
+             (None, None), ("opening", "Opening balance")]
 QUICK_KEYS = {"e": "expense", "i": "income", "t": "transfer"}
 
 
 class FinanceApp(tk.Tk):
     PAGES = [("overview", "Overview"), ("income", "Income"), ("expenses", "Expenses"),
-             ("transfers", "Transfers"), ("savings", "Savings"), ("lending", "Lending"),
+             ("transfers", "Transfers"), ("savings", "Savings"), ("lending", "Lending"), ("borrowing", "Borrowing"),
              ("activity", "All activity"), ("settings", "Settings")]
 
     def __init__(self, demo=False):
@@ -3330,6 +3633,7 @@ class FinanceApp(tk.Tk):
         self.selected_month = date.today().strftime("%Y-%m")
         self.nav = {}
         self.filter_states = {}
+        self.debt_filters: Dict[str, Dict[str, Any]] = {}
         self._search_job = None
         self._table_context = None
         self._style()
@@ -3854,6 +4158,15 @@ class FinanceApp(tk.Tk):
     def toast(self, text, error=False):
         if hasattr(self, "toast_label") and self.toast_label.winfo_exists():
             self.toast_label.configure(text=text, fg=P["red"] if error else P["green"])
+            if getattr(self, "_toast_job", None):
+                self.after_cancel(self._toast_job)
+            # Confirmations clear themselves; errors stay a little longer.
+            self._toast_job = self.after(12000 if error else 5000, self._clear_toast)
+
+    def _clear_toast(self):
+        self._toast_job = None
+        if hasattr(self, "toast_label") and self.toast_label.winfo_exists():
+            self.toast_label.configure(text="")
 
     def render(self):
         if not hasattr(self, "content"):
@@ -3997,8 +4310,7 @@ class FinanceApp(tk.Tk):
             for currency in DISPLAY_RATE_KEYS)
         Button(foot, "Edit rates", self.open_display_rates, variant="secondary",
                height=30, small=True).pack(side="left")
-        self.dinar_rates_label = label(foot, quotes + "  •  loans not included", 11, P["dim"],
-                                       bg=P["hero"])
+        self.dinar_rates_label = label(foot, quotes, 11, P["dim"], bg=P["hero"])
         self.dinar_rates_label.pack(side="left", padx=(12, 0))
 
         right = tk.Frame(inner, bg=P["hero"])
@@ -4022,6 +4334,33 @@ class FinanceApp(tk.Tk):
             if equivalent:
                 label(value_host, equivalent, 10, P["dim"], bg=P["hero"],
                       anchor="e").pack(fill="x", pady=(1, 0))
+        self.debts_strip(box)
+
+    def debts_strip(self, box):
+        """What others owe you, what you owe, and what is left once both are settled."""
+        snap = self.snapshot
+        if not snap.valid:
+            return
+        lent = dzd_equivalent(snap.lent_totals(), snap.settings)
+        owed = dzd_equivalent(snap.owed_totals(), snap.settings)
+        total = total_in_dinars(snap)
+        strip = tk.Frame(box, bg=blend(P["hero_border"], P["hero"], 0.35))
+        strip.pack(fill="x")
+        strip.grid_columnconfigure((0, 1, 2), weight=1, uniform="debts_strip")
+        net = (total + lent - owed) if None not in (total, lent, owed) else None
+        cells = [("Owed to you", lent, ACTIVITY_COLORS["loan_out"], "lending"),
+                 ("You owe", owed, ACTIVITY_COLORS["borrow"], "borrowing"),
+                 ("Worth after debts", net, P["text"], None)]
+        for i, (title, value, color, page) in enumerate(cells):
+            cell = tk.Frame(strip, bg=strip.cget("bg"))
+            cell.grid(row=0, column=i, sticky="nsew", padx=(24 if i == 0 else 8, 24 if i == 2 else 8), pady=12)
+            label(cell, title.upper(), 9, P["dim"], True, bg=cell.cget("bg")).pack(fill="x")
+            text = "\u2014" if value is None else ("\u2248 " + fmt(value, "DZD"))
+            label(cell, text, 15, color if value else P["muted"], True, bg=cell.cget("bg")).pack(fill="x", pady=(3, 0))
+            if page:
+                for widget in [cell] + cell.winfo_children():
+                    safe_cursor(widget, True)
+                    widget.bind("<Button-1>", lambda e, p=page: self.navigate(p))
 
     def account_cards(self, parent, mode="available"):
         grid = tk.Frame(parent, bg=P["bg"])
@@ -4169,6 +4508,8 @@ class FinanceApp(tk.Tk):
             "savings": ("Savings", [("Add savings", lambda: self.open_form("savings_deposit"), "primary"),
                                     ("Release", lambda: self.open_form("savings_withdraw"), "secondary")]),
             "lending": ("Lending", [("New loan", lambda: self.open_form("loan_out"), "primary")]),
+            "borrowing": ("Borrowing", [("Borrowed money", lambda: self.open_form("borrow"), "primary"),
+                                        ("Pay back", lambda: self.open_form("borrow_repaid"), "secondary")]),
             "activity": ("All activity", [("Reset filters", self.review_reset, "secondary"),
                                           ("Export this view", self.export_review, "secondary")])}
         title, actions = configurations[page]
@@ -4233,7 +4574,9 @@ class FinanceApp(tk.Tk):
             self.account_cards(body, mode="saved")
             self.activity_table(body, allowed={"savings_deposit", "savings_withdraw"})
         elif page == "lending":
-            self.render_loans(body)
+            self.render_debts(body, "lent")
+        elif page == "borrowing":
+            self.render_debts(body, "borrowed")
         else:
             self.activity_table(body, allowed=None, allow_scope=True)
 
@@ -4401,9 +4744,12 @@ class FinanceApp(tk.Tk):
         color = ACTIVITY_COLORS.get(r.kind, P["text"])
         if r.kind == "transfer":
             amount = f"{fmt(r.amount, r.currency)} → {fmt(r.received, ACCOUNTS[r.destination].currency)}"
-        elif r.kind in ("income", "opening", "loan_repaid") or (r.kind == "adjustment" and r.amount >= ZERO):
+        elif r.kind in ("income", "opening", "loan_repaid", "borrow") or (r.kind == "adjustment" and r.amount >= ZERO):
             amount = "+ " + fmt(abs(r.amount), r.currency)
-        elif r.kind in ("expense", "loan_out", "adjustment"):
+        elif r.kind == "borrow_repaid" and (self.snapshot.by_id(r.loan_id) or r).currency != r.currency:
+            debt = self.snapshot.by_id(r.loan_id)
+            amount = f"− {fmt(r.amount, r.currency)} = {fmt(r.cleared, debt.currency)}"
+        elif r.kind in ("expense", "loan_out", "borrow_repaid", "adjustment"):
             amount = "− " + fmt(abs(r.amount), r.currency)
         else:
             amount = fmt(r.amount, r.currency)
@@ -4411,6 +4757,13 @@ class FinanceApp(tk.Tk):
             sub = expense_category(r)
         elif r.kind in ("transfer", "savings_deposit", "savings_withdraw"):
             sub = r.route
+        elif r.kind == "borrow":
+            sub = ACCOUNTS[r.account].name + (f"  \u00b7  {r.description}" if r.description else "")
+        elif r.kind == "borrow_repaid":
+            debt = self.snapshot.by_id(r.loan_id)
+            sub = ACCOUNTS[r.account].name
+            if debt and debt.currency != r.currency:
+                sub += f"  \u00b7  cleared {fmt(r.cleared, debt.currency)}"
         else:
             sub = ACCOUNTS[r.account].name
         if r.notes:
@@ -4585,7 +4938,14 @@ class FinanceApp(tk.Tk):
                   anchor="w").pack(fill="x", pady=(4, 0))
             Button(actions, "Unmark" if state == "checked" else "Mark checked", lambda: self.review_toggle_checks(),
                    variant="secondary" if state == "checked" else "primary", height=34, small=True).pack(side="left")
-            if not r.voided and r.kind not in ("loan_repaid", "adjustment"):
+            if not r.voided and r.kind in ("income", "expense"):
+                Button(actions, "Is a borrowing" if r.kind == "income" else "Is a payback",
+                       lambda: self.open_form("borrow" if r.kind == "income" else "borrow_repaid", convert=r),
+                       variant="secondary", height=34, small=True).pack(side="left", padx=(8, 0))
+            if not r.voided and r.kind == "borrow" and self.snapshot.owed.get(r.id, ZERO) > ZERO:
+                Button(actions, "Pay back", lambda: self.open_form("borrow_repaid", loan=r),
+                       variant="secondary", height=34, small=True).pack(side="left", padx=(8, 0))
+            if not r.voided and r.kind not in ("loan_repaid", "borrow_repaid", "adjustment"):
                 Button(actions, "Edit", lambda: self.open_form(r.kind, record=r), variant="secondary",
                        height=34, small=True).pack(side="left", padx=(8, 0))
             Button(actions, "Void / details", lambda: self.review_open(r.id), variant="secondary",
@@ -5231,59 +5591,178 @@ class FinanceApp(tk.Tk):
             if record:
                 DetailDialog(self, record)
 
-    def render_loans(self, parent):
+    def render_debts(self, parent, mode):
+        """Lending (money owed to you) and Borrowing (money you owe) share one layout."""
+        snap = self.snapshot
+        lent = mode == "lent"
+        kind, payback_kind = ("loan_out", "loan_repaid") if lent else ("borrow", "borrow_repaid")
+        remaining_of = snap.outstanding if lent else snap.owed
+        color = ACTIVITY_COLORS[kind]
+        state = self.debt_filters.setdefault(mode, {"person": None, "show": "open"})
+        records = [r for r in snap.records if r.kind == kind and not r.voided]
+        paybacks: Dict[str, List[Record]] = {}
+        for r in snap.records:
+            if r.kind == payback_kind and not r.voided:
+                paybacks.setdefault(r.loan_id, []).append(r)
+
         totals = {c: ZERO for c in CURRENCIES}
-        for rid, remaining in self.snapshot.outstanding.items():
-            loan = self.snapshot.by_id(rid)
-            if loan:
-                totals[loan.currency] += remaining
+        for r in records:
+            totals[r.currency] += remaining_of.get(r.id, ZERO)
         row = tk.Frame(parent, bg=P["bg"])
-        row.pack(fill="x", pady=(0, 24))
-        for i, currency in enumerate(CURRENCIES):
-            row.grid_columnconfigure(i, weight=1, uniform="loans")
-            box = card(row)
-            box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 7, 0 if i == 2 else 7))
-            label(box, currency + "  /  OUTSTANDING", 10, P["dim"], True).pack(fill="x", padx=20, pady=(20, 12))
-            value = totals[currency]
-            equivalent = (dinar_equivalent_text(value, currency,
-                                                self.snapshot.settings)
-                          if self.snapshot.valid else "")
-            fit_label(box, fmt(value, currency) if self.snapshot.valid else "--", 26,
-                      P["amber"], minimum=15).pack(fill="x", padx=20, pady=(0, 4))
-            label(box, equivalent or "Owed to you", 11, P["muted"]).pack(
-                fill="x", padx=20, pady=(0, 22))
-        label(parent, "Your loans", 17, bold=True).pack(fill="x", pady=(0, 15))
-        loans = [r for r in self.snapshot.records if r.kind == "loan_out" and not r.voided]
-        loans.sort(key=lambda r: (self.snapshot.outstanding.get(r.id, ZERO) == ZERO, r.day), reverse=False)
-        if not loans:
-            self.notice(parent, "No loans recorded. Add one to track the amount owed and repayments.", P["muted"])
-        for loan in loans:
-            remaining = self.snapshot.outstanding.get(loan.id, ZERO)
+        row.pack(fill="x", pady=(0, 20))
+        dinars = dzd_equivalent(totals, snap.settings) if snap.valid else None
+        cells = [("TOTAL", ("≈ " + fmt(dinars, "DZD")) if dinars is not None else "—",
+                  "Owed to you, all currencies" if lent else "You owe, all currencies")]
+        cells += [(c, fmt(totals[c], c) if snap.valid else "—",
+                   dinar_equivalent_text(totals[c], c, snap.settings) or ("Owed to you" if lent else "You owe"))
+                  for c in CURRENCIES]
+        for i, (title, value, sub) in enumerate(cells):
+            row.grid_columnconfigure(i, weight=1, uniform="debts")
+            box = card(row, tone=P["hero"] if i == 0 else P["card"], border_color=P["hero_border"] if i == 0 else None)
+            box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0 if i == len(cells) - 1 else 6))
+            bg = box.cget("bg")
+            label(box, title, 10, P["dim"] if i else P["cyan"], True, bg=bg).pack(fill="x", padx=18, pady=(16, 8))
+            zero = i > 0 and totals[CURRENCIES[i - 1]] == ZERO
+            fit_label(box, value, 24, P["dim"] if zero else color if i else P["text"], minimum=14,
+                      bg=bg).pack(fill="x", padx=18)
+            label(box, sub, 11, P["muted"], bg=bg).pack(fill="x", padx=18, pady=(4, 16))
+
+        # People: one tile per person with what is still open across their debts.
+        people: Dict[str, Dict[str, Any]] = {}
+        for r in records:
+            entry = people.setdefault(r.borrower.strip(), {"left": {c: ZERO for c in CURRENCIES},
+                                                           "total": ZERO, "paid": ZERO, "open": 0})
+            left = remaining_of.get(r.id, ZERO)
+            entry["left"][r.currency] += left
+            entry["total"] += amount_in_dinars(r.amount, r.currency, snap.settings) or r.amount
+            entry["paid"] += amount_in_dinars(r.amount - left, r.currency, snap.settings) or (r.amount - left)
+            entry["open"] += 1 if left > ZERO else 0
+        head = tk.Frame(parent, bg=P["bg"])
+        head.pack(fill="x", pady=(0, 10))
+        label(head, "People", 17, bold=True).pack(side="left")
+        if state["person"]:
+            Button(head, "Show everyone", lambda: (state.update(person=None), self.render()),
+                   variant="secondary", height=30, small=True).pack(side="right")
+        if not people:
+            self.notice(parent, ("Nothing lent yet. Use New loan when you lend someone money."
+                                 if lent else "No debts recorded. Use Borrowed money when someone lends you money, "
+                                              "or open an old income in All activity and convert it."), P["muted"])
+            return
+        grid = tk.Frame(parent, bg=P["bg"])
+        grid.pack(fill="x", pady=(0, 22))
+        for col in range(4):
+            grid.grid_columnconfigure(col, weight=1, uniform="people")
+        ordered = sorted(people.items(), key=lambda item: (-item[1]["open"], item[0].casefold()))
+        for i, (name, entry) in enumerate(ordered):
+            col = i % 4
+            grid.grid_columnconfigure(col, weight=1, uniform="people")
+            active = state["person"] == name
+            tile = card(grid, tone=blend(color, P["card"], 0.12) if active else P["card"],
+                        border_color=color if active else None)
+            tile.grid(row=i // 4, column=col, sticky="nsew", padx=(0 if col == 0 else 5, 0 if col == 3 else 5),
+                      pady=(0, 10))
+            bg = tile.cget("bg")
+            label(tile, name, 14, P["text"], True, bg=bg).pack(fill="x", padx=16, pady=(14, 2))
+            left_parts = [fmt(v, c) for c, v in entry["left"].items() if v > ZERO]
+            label(tile, ("Owes you " if lent else "You owe ") + " + ".join(left_parts) if left_parts else
+                  "All settled", 12, color if left_parts else P["green"], True, bg=bg, width=1).pack(fill="x", padx=16)
+            bar = tk.Canvas(tile, height=6, bg=bg, highlightthickness=0)
+            bar.pack(fill="x", padx=16, pady=(10, 6))
+            share = float(entry["paid"] / entry["total"]) if entry["total"] else 1.0
+
+            def draw(event, bar=bar, share=share):
+                bar.delete("all")
+                rounded_rect(bar, 0, 0, event.width, 6, 3, fill=P["hairline"])
+                if share > 0:
+                    rounded_rect(bar, 0, 0, max(6, event.width * min(1.0, share)), 6, 3, fill=P["green"])
+            bar.bind("<Configure>", draw)
+            label(tile, f"{round(share * 100)}% paid back  ·  {entry['open']} open", 10, P["dim"],
+                  bg=bg).pack(fill="x", padx=16, pady=(0, 14))
+            for widget in [tile] + tile.winfo_children():
+                safe_cursor(widget, True)
+                widget.bind("<Button-1>", lambda e, n=name: (state.update(person=None if state["person"] == n else n),
+                                                             self.render()))
+
+        # The debts themselves.
+        head = tk.Frame(parent, bg=P["bg"])
+        head.pack(fill="x", pady=(0, 10))
+        label(head, ("Loans to " if lent else "Debts to ") + state["person"] if state["person"] else
+              ("Your loans" if lent else "Your debts"), 17, bold=True).pack(side="left")
+        chips = tk.Frame(head, bg=P["bg"])
+        chips.pack(side="right")
+        for value, name in (("open", "Open"), ("done", "Paid off"), ("all", "All")):
+            Chip(chips, name, None, lambda v=value: (state.update(show=v), self.render()),
+                 active=state["show"] == value).pack(side="left", padx=(6, 0))
+        shown = [r for r in records if (not state["person"] or r.borrower.strip() == state["person"])]
+        if state["show"] == "open":
+            shown = [r for r in shown if remaining_of.get(r.id, ZERO) > ZERO]
+        elif state["show"] == "done":
+            shown = [r for r in shown if remaining_of.get(r.id, ZERO) == ZERO]
+        shown.sort(key=lambda r: (remaining_of.get(r.id, ZERO) == ZERO, r.day))
+        if not shown:
+            self.notice(parent, "Nothing here with these filters.", P["muted"])
+        for r in shown:
+            left = remaining_of.get(r.id, ZERO)
             box = card(parent)
             box.pack(fill="x", pady=(0, 10))
             right = tk.Frame(box, bg=P["card"])
-            right.pack(side="right", padx=20, pady=20)
-            remaining_equivalent = dinar_equivalent_text(
-                remaining, loan.currency, self.snapshot.settings)
-            label(right, fmt(remaining, loan.currency), 23,
-                  P["amber"] if remaining else P["green"], True).pack(anchor="e")
-            if remaining_equivalent:
-                label(right, remaining_equivalent, 11, P["muted"]).pack(
-                    anchor="e", pady=(3, 0))
-            label(right, "Remaining" if remaining else "Fully repaid", 11,
-                  P["dim"]).pack(anchor="e", pady=(3, 12))
+            right.pack(side="right", padx=20, pady=18, anchor="n")
+            label(right, fmt(left, r.currency) if left else "Settled", 22, color if left else P["green"],
+                  True, anchor="e").pack(anchor="e")
+            equivalent = dinar_equivalent_text(left, r.currency, snap.settings) if left else ""
+            label(right, equivalent or ("left to pay" if not lent and left else "still owed to you" if left else ""),
+                  11, P["muted"], anchor="e").pack(anchor="e", pady=(2, 10))
             actions = tk.Frame(right, bg=P["card"])
             actions.pack(anchor="e")
-            Button(actions, "Details", lambda r=loan: DetailDialog(self, r), variant="secondary", height=32, small=True).pack(side="left")
-            if remaining:
-                Button(actions, "Record repayment", lambda r=loan: self.open_form("loan_repaid", loan=r), height=32, small=True).pack(side="left", padx=(8, 0))
-            left = tk.Frame(box, bg=P["card"])
-            left.pack(side="left", fill="x", expand=True, padx=22, pady=22)
-            label(left, loan.borrower, 18, bold=True).pack(fill="x")
-            label(left, f"{loan.day}  /  {loan.route}", 12, P["muted"]).pack(fill="x", pady=(8, 5))
-            label(left, f"Lent {fmt(loan.amount, loan.currency)}  /  Repaid {fmt(loan.amount-remaining, loan.currency)}", 12, P["dim"]).pack(fill="x")
-            if loan.notes:
-                label(left, loan.notes, 12, P["muted"], wraplength=390, justify="left").pack(fill="x", pady=(10, 0))
+            Button(actions, "Details", lambda x=r: self.open_details(x), variant="secondary", height=32,
+                   small=True).pack(side="left")
+            if left:
+                Button(actions, "Record repayment" if lent else "Pay back",
+                       lambda x=r: self.open_form(payback_kind, loan=x), height=32, small=True).pack(
+                    side="left", padx=(8, 0))
+            info = tk.Frame(box, bg=P["card"])
+            info.pack(side="left", fill="x", expand=True, padx=22, pady=18)
+            top = tk.Frame(info, bg=P["card"])
+            top.pack(fill="x")
+            label(top, r.borrower, 17, bold=True, bg=P["card"]).pack(side="left")
+            label(top, f"   {date.fromisoformat(r.day):%a %d %b %Y}  ·  "
+                       f"{'from' if lent else 'into'} {ACCOUNTS[r.account].name}", 12, P["muted"],
+                  bg=P["card"]).pack(side="left", pady=(4, 0))
+            if r.description and not lent:
+                label(info, r.description, 12, P["text"], bg=P["card"], wraplength=520,
+                      justify="left").pack(fill="x", pady=(6, 0))
+            done = r.amount - left
+            label(info, f"{'Lent' if lent else 'Borrowed'} {fmt(r.amount, r.currency)}   ·   "
+                        f"{'Repaid' if lent else 'Paid back'} {fmt(done, r.currency)}", 12, P["dim"],
+                  bg=P["card"]).pack(fill="x", pady=(6, 6))
+            bar = tk.Canvas(info, height=6, bg=P["card"], highlightthickness=0)
+            bar.pack(fill="x", pady=(0, 8))
+            share = float(done / r.amount) if r.amount else 1.0
+
+            def draw(event, bar=bar, share=share):
+                bar.delete("all")
+                rounded_rect(bar, 0, 0, event.width, 6, 3, fill=P["hairline"])
+                if share > 0:
+                    rounded_rect(bar, 0, 0, max(6, event.width * min(1.0, share)), 6, 3, fill=P["green"])
+            bar.bind("<Configure>", draw)
+            history = sorted(paybacks.get(r.id, []), key=chrono_key)
+            for p in history[-4:]:
+                cleared = p.cleared if p.kind == "borrow_repaid" else p.amount
+                text = f"{p.day}   {fmt(p.amount, p.currency)} {'into' if lent else 'from'} {ACCOUNTS[p.account].name}"
+                if p.currency != r.currency:
+                    text += f"   (cleared {fmt(cleared, r.currency)})"
+                label(info, "✓  " + text, 11, P["muted"], bg=P["card"]).pack(fill="x")
+            if len(history) > 4:
+                label(info, f"+ {len(history) - 4} earlier payments", 11, P["dim"], bg=P["card"]).pack(fill="x")
+            if r.notes:
+                label(info, r.notes, 11, P["dim"], bg=P["card"], wraplength=520, justify="left").pack(
+                    fill="x", pady=(6, 0))
+
+    def open_details(self, record):
+        if self.modals:
+            self.lift_modal()
+            return
+        DetailDialog(self, record)
 
     def render_settings(self):
         self.page_header("Settings", "")
@@ -5354,14 +5833,14 @@ class FinanceApp(tk.Tk):
                 label(checks, text, 12, P["red"] if text in self.snapshot.errors else P["amber"], wraplength=860, justify="left").pack(fill="x", pady=(0, 12))
         label(body, "FINANCE " + APP_VERSION + "  /  BUILT FOR A SINGLE PERSONAL LEDGER", 10, P["dim"], True).pack(fill="x", pady=(10, 12))
 
-    def open_form(self, kind, record=None, loan=None, account=None):
+    def open_form(self, kind, record=None, loan=None, account=None, convert=None):
         if self.modals:
             next(iter(self.modals)).lift()
             return
         if not self.can_write():
             self.toast("Changes are disabled until your database is connected and data checks pass.", error=True)
             return
-        TransactionDialog(self, kind, record=record, loan=loan, account=account)
+        TransactionDialog(self, kind, record=record, loan=loan, account=account, convert=convert)
 
     def change_connection(self):
         if self.demo:
